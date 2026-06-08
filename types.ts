@@ -1,3 +1,9 @@
+export interface GraphCamera {
+	x: number;
+	y: number;
+	zoom: number;
+}
+
 export type GraphSocketDirection = 'input' | 'output';
 
 export interface GraphSocket {

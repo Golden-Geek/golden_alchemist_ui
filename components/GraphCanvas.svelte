@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import type {
+		GraphCamera,
 		GraphConnectionRequest,
 		GraphEdge,
 		GraphNode,
@@ -10,12 +11,6 @@
 		GraphSocketDirection,
 		GraphSocketRef
 	} from '../types';
-
-	interface Camera {
-		x: number;
-		y: number;
-		zoom: number;
-	}
 
 	interface PanGesture {
 		pointerId: number;
@@ -56,6 +51,8 @@
 		onNodeMove,
 		onNodesMove,
 		onConnect,
+		initialCamera,
+		onCameraChange,
 		emptyLabel = 'No nodes in this graph.'
 	}: {
 		nodes: GraphNode[];
@@ -65,6 +62,8 @@
 		onNodeMove?: (nodeId: string, position: GraphNodePosition) => void | Promise<void>;
 		onNodesMove?: (moves: GraphNodeMove[]) => void | Promise<void>;
 		onConnect?: (connection: GraphConnectionRequest) => void;
+		initialCamera?: GraphCamera;
+		onCameraChange?: (camera: GraphCamera) => void;
 		emptyLabel?: string;
 	} = $props();
 
@@ -78,8 +77,20 @@
 	const FRAME_PADDING_REM = 3;
 	const CAMERA_ANIMATION_MS = 240;
 
+	const finiteNumber = (value: number | undefined, fallback: number): number =>
+		typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+
+	const normalizeCamera = (value: GraphCamera | undefined): GraphCamera => ({
+		x: finiteNumber(value?.x, 0),
+		y: finiteNumber(value?.y, 0),
+		zoom: Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, finiteNumber(value?.zoom, 1)))
+	});
+
+	const cameraKey = (value: GraphCamera): string => `${value.x}:${value.y}:${value.zoom}`;
+
 	let container: HTMLDivElement | null = $state(null);
-	let camera = $state<Camera>({ x: 0, y: 0, zoom: 1 });
+	let camera = $state<GraphCamera>({ x: 0, y: 0, zoom: 1 });
+	let appliedInitialCameraKey = $state<string | null>(null);
 	let remPx = $state(16);
 	let viewportWidth = $state(1);
 	let viewportHeight = $state(1);
@@ -135,6 +146,19 @@
 
 	const clamp = (value: number, minimum: number, maximum: number): number =>
 		Math.min(maximum, Math.max(minimum, value));
+
+	const camerasMatch = (left: GraphCamera, right: GraphCamera): boolean =>
+		Math.abs(left.x - right.x) < 0.0001 &&
+		Math.abs(left.y - right.y) < 0.0001 &&
+		Math.abs(left.zoom - right.zoom) < 0.0001;
+
+	const applyCamera = (next: GraphCamera, notify = true): void => {
+		const normalized = normalizeCamera(next);
+		camera = normalized;
+		if (notify) {
+			onCameraChange?.({ ...normalized });
+		}
+	};
 
 	const nodeWidth = (node: GraphNode): number => node.width ?? DEFAULT_NODE_WIDTH_REM;
 
@@ -223,7 +247,7 @@
 		};
 	};
 
-	const cameraAtZoom = (zoom: number, anchorX: number, anchorY: number): Camera => {
+	const cameraAtZoom = (zoom: number, anchorX: number, anchorY: number): GraphCamera => {
 		const nextZoom = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
 		const worldX = (anchorX - camera.x) / camera.zoom;
 		const worldY = (anchorY - camera.y) / camera.zoom;
@@ -241,18 +265,34 @@
 		}
 	};
 
-	const animateCamera = (target: Camera): void => {
+	$effect(() => {
+		if (!initialCamera) {
+			return;
+		}
+		const normalized = normalizeCamera(initialCamera);
+		const key = cameraKey(normalized);
+		if (key === appliedInitialCameraKey) {
+			return;
+		}
+		appliedInitialCameraKey = key;
+		if (!camerasMatch(camera, normalized)) {
+			cancelCameraAnimation();
+			applyCamera(normalized, false);
+		}
+	});
+
+	const animateCamera = (target: GraphCamera): void => {
 		cancelCameraAnimation();
 		const source = { ...camera };
 		const startedAt = performance.now();
 		const tick = (now: number): void => {
 			const progress = clamp((now - startedAt) / CAMERA_ANIMATION_MS, 0, 1);
 			const eased = 1 - (1 - progress) ** 3;
-			camera = {
+			applyCamera({
 				x: source.x + (target.x - source.x) * eased,
 				y: source.y + (target.y - source.y) * eased,
 				zoom: source.zoom + (target.zoom - source.zoom) * eased
-			};
+			});
 			if (progress < 1) {
 				animationFrame = requestAnimationFrame(tick);
 			} else {
@@ -264,7 +304,7 @@
 
 	const setZoom = (zoom: number): void => {
 		cancelCameraAnimation();
-		camera = cameraAtZoom(zoom, viewportWidth * 0.5, viewportHeight * 0.5);
+		applyCamera(cameraAtZoom(zoom, viewportWidth * 0.5, viewportHeight * 0.5));
 	};
 
 	const resetZoom = (): void => {
@@ -473,11 +513,11 @@
 			return;
 		}
 		if (panGesture?.pointerId === event.pointerId) {
-			camera = {
+			applyCamera({
 				...camera,
 				x: panGesture.cameraX + event.clientX - panGesture.startX,
 				y: panGesture.cameraY + event.clientY - panGesture.startY
-			};
+			});
 			return;
 		}
 		if (nodeDragGesture?.pointerId === event.pointerId) {
@@ -563,7 +603,7 @@
 		const pointerX = event.clientX - bounds.left;
 		const pointerY = event.clientY - bounds.top;
 		cancelCameraAnimation();
-		camera = cameraAtZoom(camera.zoom * Math.exp(-event.deltaY * 0.0014), pointerX, pointerY);
+		applyCamera(cameraAtZoom(camera.zoom * Math.exp(-event.deltaY * 0.0014), pointerX, pointerY));
 	};
 
 	const handleKeydown = (event: KeyboardEvent): void => {
@@ -591,7 +631,9 @@
 			viewportHeight = Math.max(1, entry.contentRect.height);
 		});
 		observer.observe(container);
-		requestAnimationFrame(() => home());
+		if (!initialCamera) {
+			requestAnimationFrame(() => home());
+		}
 		return () => {
 			observer.disconnect();
 			cancelCameraAnimation();
