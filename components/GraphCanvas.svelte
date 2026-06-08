@@ -362,7 +362,7 @@
 	};
 
 	const handleKeydown = (event: KeyboardEvent): void => {
-		if (event.ctrlKey || event.metaKey || event.altKey) {
+		if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) {
 			return;
 		}
 		if (event.key.toLowerCase() === 'f') {
