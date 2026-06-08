@@ -7,6 +7,8 @@
 		GraphNode,
 		GraphNodeMove,
 		GraphNodePosition,
+		GraphNodeResize,
+		GraphNodeSize,
 		GraphSocket,
 		GraphSocketDirection,
 		GraphSocketRef
@@ -27,6 +29,14 @@
 		startX: number;
 		startY: number;
 		nodePositions: Record<string, GraphNodePosition>;
+	}
+
+	interface NodeResizeGesture {
+		pointerId: number;
+		nodeId: string;
+		startX: number;
+		startY: number;
+		startSize: GraphNodeSize;
 	}
 
 	interface SelectionGesture {
@@ -52,6 +62,7 @@
 		onSelectionChange,
 		onNodeMove,
 		onNodesMove,
+		onNodeResize,
 		onConnect,
 		initialCamera,
 		onCameraChange,
@@ -63,6 +74,7 @@
 		onSelectionChange?: (nodeIds: string[]) => void;
 		onNodeMove?: (nodeId: string, position: GraphNodePosition) => void | Promise<void>;
 		onNodesMove?: (moves: GraphNodeMove[]) => void | Promise<void>;
+		onNodeResize?: (resize: GraphNodeResize) => void | Promise<void>;
 		onConnect?: (connection: GraphConnectionRequest) => void;
 		initialCamera?: GraphCamera;
 		onCameraChange?: (camera: GraphCamera) => void;
@@ -73,6 +85,7 @@
 	const MAX_ZOOM = 2.5;
 	const CHECKER_CELL_REM = 2;
 	const DEFAULT_NODE_WIDTH_REM = 13;
+	const MIN_NODE_WIDTH_REM = 8;
 	const NODE_HEADER_REM = 2.55;
 	const SOCKET_ROW_REM = 1.45;
 	const SOCKET_START_REM = 3.25;
@@ -98,17 +111,21 @@
 	let viewportHeight = $state(1);
 	let panGesture = $state<PanGesture | null>(null);
 	let nodeDragGesture = $state<NodeDragGesture | null>(null);
+	let nodeResizeGesture = $state<NodeResizeGesture | null>(null);
 	let selectionGesture = $state<SelectionGesture | null>(null);
 	let connectionDraft = $state<ConnectionDraft | null>(null);
 	let dragPositions = $state<Record<string, GraphNodePosition>>({});
 	let optimisticPositions = $state<Record<string, GraphNodePosition>>({});
+	let resizeSizes = $state<Record<string, GraphNodeSize>>({});
+	let optimisticSizes = $state<Record<string, GraphNodeSize>>({});
 	let animationFrame: number | null = null;
 
 	let selectedIds = $derived(new Set(selectedNodeIds));
 	let effectiveNodes = $derived(
 		nodes.map((node) => {
 			const position = dragPositions[node.id] ?? optimisticPositions[node.id];
-			return position ? { ...node, ...position } : node;
+			const size = resizeSizes[node.id] ?? optimisticSizes[node.id];
+			return position || size ? { ...node, ...position, ...size } : node;
 		})
 	);
 	let nodesById = $derived(new Map(effectiveNodes.map((node) => [node.id, node])));
@@ -146,6 +163,28 @@
 		}
 	});
 
+	$effect(() => {
+		let next = optimisticSizes;
+		for (const node of nodes) {
+			const optimistic = next[node.id];
+			if (
+				optimistic &&
+				typeof node.width === 'number' &&
+				typeof node.height === 'number' &&
+				Math.abs(node.width - optimistic.width) < 0.0001 &&
+				Math.abs(node.height - optimistic.height) < 0.0001
+			) {
+				if (next === optimisticSizes) {
+					next = { ...optimisticSizes };
+				}
+				delete next[node.id];
+			}
+		}
+		if (next !== optimisticSizes) {
+			optimisticSizes = next;
+		}
+	});
+
 	const clamp = (value: number, minimum: number, maximum: number): number =>
 		Math.min(maximum, Math.max(minimum, value));
 
@@ -162,13 +201,17 @@
 		}
 	};
 
-	const nodeWidth = (node: GraphNode): number => node.width ?? DEFAULT_NODE_WIDTH_REM;
+	const nodeWidth = (node: GraphNode): number =>
+		Math.max(MIN_NODE_WIDTH_REM, node.width ?? DEFAULT_NODE_WIDTH_REM);
 
-	const nodeHeight = (node: GraphNode): number =>
+	const minimumNodeHeight = (node: GraphNode): number =>
 		Math.max(
 			NODE_HEADER_REM + 1.2,
 			NODE_HEADER_REM + 1.4 + Math.max(node.inputs.length, node.outputs.length, 1) * SOCKET_ROW_REM
 		);
+
+	const nodeHeight = (node: GraphNode): number =>
+		Math.max(minimumNodeHeight(node), node.height ?? minimumNodeHeight(node));
 
 	let visibleNodes = $derived.by(() => {
 		const margin = 8;
@@ -493,6 +536,28 @@
 		container?.setPointerCapture(event.pointerId);
 	};
 
+	const startNodeResize = (event: PointerEvent, node: GraphNode): void => {
+		if (event.button !== 0 || !node.resizable) {
+			return;
+		}
+		event.stopPropagation();
+		container?.focus();
+		if (!selectedIds.has(node.id)) {
+			updateSelection(node.id, false);
+		}
+		nodeResizeGesture = {
+			pointerId: event.pointerId,
+			nodeId: node.id,
+			startX: event.clientX,
+			startY: event.clientY,
+			startSize: {
+				width: nodeWidth(node),
+				height: nodeHeight(node)
+			}
+		};
+		container?.setPointerCapture(event.pointerId);
+	};
+
 	const startConnection = (event: PointerEvent, nodeId: string, socket: GraphSocket): void => {
 		if (event.button !== 0 || socket.compatible === false) {
 			return;
@@ -559,6 +624,22 @@
 			dragPositions = nextPositions;
 			return;
 		}
+		if (nodeResizeGesture?.pointerId === event.pointerId) {
+			const node = nodesById.get(nodeResizeGesture.nodeId);
+			if (!node) {
+				return;
+			}
+			const deltaX = (event.clientX - nodeResizeGesture.startX) / camera.zoom / remPx;
+			const deltaY = (event.clientY - nodeResizeGesture.startY) / camera.zoom / remPx;
+			resizeSizes = {
+				...resizeSizes,
+				[node.id]: {
+					width: Math.max(MIN_NODE_WIDTH_REM, nodeResizeGesture.startSize.width + deltaX),
+					height: Math.max(minimumNodeHeight(node), nodeResizeGesture.startSize.height + deltaY)
+				}
+			};
+			return;
+		}
 		if (connectionDraft?.pointerId === event.pointerId) {
 			const world = clientToWorldPx(event.clientX, event.clientY);
 			connectionDraft = { ...connectionDraft, endX: world.x, endY: world.y };
@@ -595,6 +676,27 @@
 		}
 	};
 
+	const clearOptimisticResize = (resize: GraphNodeResize): void => {
+		const pending = optimisticSizes[resize.nodeId];
+		if (pending?.width === resize.size.width && pending?.height === resize.size.height) {
+			const next = { ...optimisticSizes };
+			delete next[resize.nodeId];
+			optimisticSizes = next;
+		}
+	};
+
+	const commitNodeResize = (resize: GraphNodeResize): void => {
+		optimisticSizes = {
+			...optimisticSizes,
+			[resize.nodeId]: resize.size
+		};
+		try {
+			void Promise.resolve(onNodeResize?.(resize)).catch(() => clearOptimisticResize(resize));
+		} catch {
+			clearOptimisticResize(resize);
+		}
+	};
+
 	const handlePointerEnd = (event: PointerEvent): void => {
 		if (selectionGesture?.pointerId === event.pointerId) {
 			finishSelectionGesture();
@@ -614,6 +716,17 @@
 			}
 			dragPositions = {};
 			nodeDragGesture = null;
+		}
+		if (nodeResizeGesture?.pointerId === event.pointerId) {
+			const size = resizeSizes[nodeResizeGesture.nodeId];
+			if (size) {
+				commitNodeResize({
+					nodeId: nodeResizeGesture.nodeId,
+					size
+				});
+			}
+			resizeSizes = {};
+			nodeResizeGesture = null;
 		}
 		if (connectionDraft?.pointerId === event.pointerId) {
 			connectionDraft = null;
@@ -676,6 +789,7 @@
 	bind:this={container}
 	class:panning={panGesture !== null}
 	class:node-dragging={nodeDragGesture !== null}
+	class:node-resizing={nodeResizeGesture !== null}
 	class:selecting={selectionGesture !== null}
 	class:connecting={connectionDraft !== null}
 	class="graph-canvas"
@@ -747,6 +861,7 @@
 				style:left={`${node.x}rem`}
 				style:top={`${node.y}rem`}
 				style:width={`${nodeWidth(node)}rem`}
+				style:height={`${nodeHeight(node)}rem`}
 				onpointerdown={(event) => selectNodeBody(event, node)}>
 				<button
 					type="button"
@@ -783,6 +898,14 @@
 						{/each}
 					</div>
 				</div>
+				{#if node.resizable}
+					<button
+						type="button"
+						class="resize-handle"
+						aria-label={`Resize ${node.label}`}
+						title={`Resize ${node.label}`}
+						onpointerdown={(event) => startNodeResize(event, node)}></button>
+				{/if}
 			</article>
 		{/each}
 	</div>
@@ -839,6 +962,10 @@
 	.graph-canvas.node-dragging,
 	.graph-canvas.connecting {
 		cursor: grabbing;
+	}
+
+	.graph-canvas.node-resizing {
+		cursor: nwse-resize;
 	}
 
 	.graph-canvas.selecting {
@@ -962,8 +1089,12 @@
 	.socket-columns {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+		align-content: start;
+		box-sizing: border-box;
+		block-size: calc(100% - 2.55rem);
 		min-block-size: 2.2rem;
 		padding-block: 0.7rem;
+		overflow: auto;
 	}
 
 	.socket-list {
@@ -1024,6 +1155,36 @@
 
 	.socket:hover .pin {
 		background: var(--socket-color);
+	}
+
+	.resize-handle {
+		position: absolute;
+		inset-inline-end: 0.12rem;
+		inset-block-end: 0.12rem;
+		inline-size: 1rem;
+		block-size: 1rem;
+		padding: 0;
+		border: 0;
+		background: linear-gradient(
+			135deg,
+			transparent 0 52%,
+			color-mix(in srgb, var(--ga-outline) 72%, transparent) 52% 60%,
+			transparent 60% 68%,
+			color-mix(in srgb, var(--ga-outline) 72%, transparent) 68% 76%,
+			transparent 76%
+		);
+		cursor: nwse-resize;
+	}
+
+	.resize-handle:hover {
+		background: linear-gradient(
+			135deg,
+			transparent 0 52%,
+			color-mix(in srgb, var(--ga-selection) 88%, transparent) 52% 60%,
+			transparent 60% 68%,
+			color-mix(in srgb, var(--ga-selection) 88%, transparent) 68% 76%,
+			transparent 76%
+		);
 	}
 
 	.toolbar {

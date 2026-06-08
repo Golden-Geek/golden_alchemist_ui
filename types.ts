@@ -21,6 +21,8 @@ export interface GraphNode {
 	x: number;
 	y: number;
 	width?: number;
+	height?: number;
+	resizable?: boolean;
 	inputs: GraphSocket[];
 	outputs: GraphSocket[];
 	active?: boolean;
@@ -53,4 +55,14 @@ export interface GraphNodePosition {
 export interface GraphNodeMove {
 	nodeId: string;
 	position: GraphNodePosition;
+}
+
+export interface GraphNodeSize {
+	width: number;
+	height: number;
+}
+
+export interface GraphNodeResize {
+	nodeId: string;
+	size: GraphNodeSize;
 }

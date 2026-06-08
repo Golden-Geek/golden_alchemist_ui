@@ -6,6 +6,8 @@ export type {
 	GraphNode,
 	GraphNodeMove,
 	GraphNodePosition,
+	GraphNodeResize,
+	GraphNodeSize,
 	GraphSocket,
 	GraphSocketDirection,
 	GraphSocketRef
