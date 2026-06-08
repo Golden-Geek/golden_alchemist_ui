@@ -60,6 +60,7 @@
 
 	const MIN_ZOOM = 0.2;
 	const MAX_ZOOM = 2.5;
+	const CHECKER_CELL_REM = 2;
 	const DEFAULT_NODE_WIDTH_REM = 13;
 	const NODE_HEADER_REM = 2.55;
 	const SOCKET_ROW_REM = 1.45;
@@ -86,8 +87,8 @@
 		})
 	);
 	let nodesById = $derived(new Map(effectiveNodes.map((node) => [node.id, node])));
-	let gridSizePx = $derived(Math.max(4, remPx * camera.zoom));
-	let checkerSizePx = $derived(gridSizePx * 2);
+	let checkerCellSizePx = $derived(Math.max(8, remPx * CHECKER_CELL_REM * camera.zoom));
+	let checkerSizePx = $derived(checkerCellSizePx * 2);
 	let transformStyle = $derived(`translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`);
 
 	const clamp = (value: number, minimum: number, maximum: number): number =>
@@ -180,10 +181,26 @@
 		};
 	};
 
-	const animateCamera = (target: Camera): void => {
+	const cameraAtZoom = (zoom: number, anchorX: number, anchorY: number): Camera => {
+		const nextZoom = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
+		const worldX = (anchorX - camera.x) / camera.zoom;
+		const worldY = (anchorY - camera.y) / camera.zoom;
+		return {
+			x: anchorX - worldX * nextZoom,
+			y: anchorY - worldY * nextZoom,
+			zoom: nextZoom
+		};
+	};
+
+	const cancelCameraAnimation = (): void => {
 		if (animationFrame !== null) {
 			cancelAnimationFrame(animationFrame);
+			animationFrame = null;
 		}
+	};
+
+	const animateCamera = (target: Camera): void => {
+		cancelCameraAnimation();
 		const source = { ...camera };
 		const startedAt = performance.now();
 		const tick = (now: number): void => {
@@ -201,6 +218,19 @@
 			}
 		};
 		animationFrame = requestAnimationFrame(tick);
+	};
+
+	const setZoom = (zoom: number): void => {
+		cancelCameraAnimation();
+		camera = cameraAtZoom(zoom, viewportWidth * 0.5, viewportHeight * 0.5);
+	};
+
+	const resetZoom = (): void => {
+		animateCamera(cameraAtZoom(1, viewportWidth * 0.5, viewportHeight * 0.5));
+	};
+
+	const handleZoomInput = (event: Event): void => {
+		setZoom((event.currentTarget as HTMLInputElement).valueAsNumber / 100);
 	};
 
 	const frameNodes = (candidates: GraphNode[]): boolean => {
@@ -373,14 +403,8 @@
 		}
 		const pointerX = event.clientX - bounds.left;
 		const pointerY = event.clientY - bounds.top;
-		const worldX = (pointerX - camera.x) / camera.zoom;
-		const worldY = (pointerY - camera.y) / camera.zoom;
-		const zoom = clamp(camera.zoom * Math.exp(-event.deltaY * 0.0014), MIN_ZOOM, MAX_ZOOM);
-		camera = {
-			x: pointerX - worldX * zoom,
-			y: pointerY - worldY * zoom,
-			zoom
-		};
+		cancelCameraAnimation();
+		camera = cameraAtZoom(camera.zoom * Math.exp(-event.deltaY * 0.0014), pointerX, pointerY);
 	};
 
 	const handleKeydown = (event: KeyboardEvent): void => {
@@ -411,9 +435,7 @@
 		requestAnimationFrame(() => home());
 		return () => {
 			observer.disconnect();
-			if (animationFrame !== null) {
-				cancelAnimationFrame(animationFrame);
-			}
+			cancelCameraAnimation();
 		};
 	});
 </script>
@@ -437,10 +459,33 @@
 	onpointercancel={handlePointerEnd}
 	onkeydown={handleKeydown}
 	onwheel={handleWheel}>
-	<div class="toolbar">
+	<div
+		class="toolbar"
+		role="group"
+		aria-label="Graph view controls"
+		onpointerdown={(event) => event.stopPropagation()}>
 		<button type="button" title="Frame selection (F)" onclick={frameSelection}>Frame</button>
 		<button type="button" title="Home (H)" onclick={home}>Home</button>
-		<output>{Math.round(camera.zoom * 100)}%</output>
+		<div class="zoom-control">
+			<input
+				class="zoom-slider"
+				type="range"
+				min={MIN_ZOOM * 100}
+				max={MAX_ZOOM * 100}
+				step="1"
+				value={camera.zoom * 100}
+				aria-label="Zoom"
+				title="Zoom"
+				oninput={handleZoomInput} />
+			<button
+				type="button"
+				class="zoom-reset"
+				aria-label="Reset zoom to 100%"
+				title="Reset zoom to 100%"
+				onclick={resetZoom}>
+				{Math.round(camera.zoom * 100)}%
+			</button>
+		</div>
 	</div>
 
 	<div class="world" style:transform={transformStyle}>
@@ -516,7 +561,11 @@
 <style>
 	.graph-canvas {
 		--ga-bg: var(--gc-color-background, #11151b);
-		--ga-grid: color-mix(in srgb, var(--gc-color-text, #d8dfeb) 16%, transparent);
+		--ga-grid-odd: var(--gc-color-graph-grid-odd, var(--ga-bg));
+		--ga-grid-even: var(
+			--gc-color-graph-grid-even,
+			color-mix(in srgb, var(--gc-color-text, #d8dfeb) 5%, var(--ga-bg))
+		);
 		--ga-node: color-mix(in srgb, var(--gc-color-background, #11151b) 80%, #293449);
 		--ga-outline: var(--gc-color-panel-outline, #536077);
 		--ga-selection: var(--gc-color-selection, #66a6ff);
@@ -530,13 +579,13 @@
 		min-block-size: 0;
 		overflow: hidden;
 		outline: none;
-		background-color: var(--ga-bg);
+		background-color: var(--ga-grid-odd);
 		background-image: conic-gradient(
 			from 90deg,
-			var(--ga-grid) 25%,
-			transparent 0 50%,
-			var(--ga-grid) 0 75%,
-			transparent 0
+			var(--ga-grid-even) 25%,
+			var(--ga-grid-odd) 0 50%,
+			var(--ga-grid-even) 0 75%,
+			var(--ga-grid-odd) 0
 		);
 		background-position: var(--camera-x, 0) var(--camera-y, 0);
 		background-size: var(--checker-size) var(--checker-size);
@@ -740,8 +789,7 @@
 		backdrop-filter: blur(0.5rem);
 	}
 
-	.toolbar button,
-	.toolbar output {
+	.toolbar button {
 		min-block-size: 1.65rem;
 		padding: 0.25rem 0.55rem;
 		border: 0;
@@ -758,6 +806,55 @@
 
 	.toolbar button:hover {
 		background: color-mix(in srgb, var(--ga-selection) 28%, transparent);
+	}
+
+	.zoom-control {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		padding-inline-start: 0.2rem;
+	}
+
+	.zoom-slider {
+		appearance: none;
+		inline-size: 4.8rem;
+		block-size: 0.16rem;
+		margin: 0;
+		padding: 0;
+		border: 0;
+		border-radius: 999rem;
+		background: color-mix(in srgb, var(--ga-outline) 42%, transparent);
+		opacity: 0.62;
+		cursor: pointer;
+		transition: opacity 120ms ease;
+	}
+
+	.zoom-slider:hover,
+	.zoom-slider:focus-visible {
+		opacity: 1;
+	}
+
+	.zoom-slider::-webkit-slider-thumb {
+		appearance: none;
+		inline-size: 0.62rem;
+		block-size: 0.62rem;
+		border: solid 0.08rem color-mix(in srgb, var(--ga-bg) 70%, transparent);
+		border-radius: 50%;
+		background: var(--ga-outline);
+	}
+
+	.zoom-slider::-moz-range-thumb {
+		inline-size: 0.52rem;
+		block-size: 0.52rem;
+		border: solid 0.08rem color-mix(in srgb, var(--ga-bg) 70%, transparent);
+		border-radius: 50%;
+		background: var(--ga-outline);
+	}
+
+	.toolbar .zoom-reset {
+		min-inline-size: 3.15rem;
+		padding-inline: 0.4rem;
+		font-variant-numeric: tabular-nums;
 	}
 
 	.empty {
