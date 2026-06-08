@@ -87,6 +87,7 @@
 	);
 	let nodesById = $derived(new Map(effectiveNodes.map((node) => [node.id, node])));
 	let gridSizePx = $derived(Math.max(4, remPx * camera.zoom));
+	let checkerSizePx = $derived(gridSizePx * 2);
 	let transformStyle = $derived(`translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`);
 
 	const clamp = (value: number, minimum: number, maximum: number): number =>
@@ -427,7 +428,7 @@
 	role="application"
 	aria-label="Node graph"
 	tabindex="0"
-	style:--grid-size={`${gridSizePx}px`}
+	style:--checker-size={`${checkerSizePx}px`}
 	style:--camera-x={`${camera.x}px`}
 	style:--camera-y={`${camera.y}px`}
 	onpointerdown={startPan}
@@ -530,9 +531,15 @@
 		overflow: hidden;
 		outline: none;
 		background-color: var(--ga-bg);
-		background-image: radial-gradient(circle, var(--ga-grid) 0.065rem, transparent 0.075rem);
+		background-image: conic-gradient(
+			from 90deg,
+			var(--ga-grid) 25%,
+			transparent 0 50%,
+			var(--ga-grid) 0 75%,
+			transparent 0
+		);
 		background-position: var(--camera-x, 0) var(--camera-y, 0);
-		background-size: var(--grid-size) var(--grid-size);
+		background-size: var(--checker-size) var(--checker-size);
 		user-select: none;
 		cursor: grab;
 	}
