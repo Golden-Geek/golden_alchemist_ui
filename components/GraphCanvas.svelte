@@ -18,6 +18,8 @@
 		startY: number;
 		cameraX: number;
 		cameraY: number;
+		moved: boolean;
+		clearSelectionOnClick: boolean;
 	}
 
 	interface NodeDragGesture {
@@ -417,17 +419,36 @@
 			container?.setPointerCapture(event.pointerId);
 			return;
 		}
-		if (event.button === 0) {
-			onSelectionChange?.([]);
-		}
 		panGesture = {
 			pointerId: event.pointerId,
 			startX: event.clientX,
 			startY: event.clientY,
 			cameraX: camera.x,
-			cameraY: camera.y
+			cameraY: camera.y,
+			moved: false,
+			clearSelectionOnClick: event.button === 0
 		};
 		container?.setPointerCapture(event.pointerId);
+	};
+
+	const selectNodeBody = (event: PointerEvent, node: GraphNode): void => {
+		if (event.button !== 0) {
+			return;
+		}
+		event.stopPropagation();
+		container?.focus();
+		const target = event.target;
+		if (
+			target instanceof Element &&
+			target.closest('button, input, textarea, select, a, [data-no-node-select]')
+		) {
+			return;
+		}
+		if (event.ctrlKey || event.metaKey || event.shiftKey) {
+			updateSelection(node.id, true);
+		} else if (!selectedIds.has(node.id)) {
+			updateSelection(node.id, false);
+		}
 	};
 
 	const startNodeDrag = (event: PointerEvent, node: GraphNode): void => {
@@ -513,10 +534,15 @@
 			return;
 		}
 		if (panGesture?.pointerId === event.pointerId) {
+			const deltaX = event.clientX - panGesture.startX;
+			const deltaY = event.clientY - panGesture.startY;
+			if (!panGesture.moved && Math.hypot(deltaX, deltaY) >= 3) {
+				panGesture = { ...panGesture, moved: true };
+			}
 			applyCamera({
 				...camera,
-				x: panGesture.cameraX + event.clientX - panGesture.startX,
-				y: panGesture.cameraY + event.clientY - panGesture.startY
+				x: panGesture.cameraX + deltaX,
+				y: panGesture.cameraY + deltaY
 			});
 			return;
 		}
@@ -574,6 +600,9 @@
 			finishSelectionGesture();
 		}
 		if (panGesture?.pointerId === event.pointerId) {
+			if (!panGesture.moved && panGesture.clearSelectionOnClick) {
+				onSelectionChange?.([]);
+			}
 			panGesture = null;
 		}
 		if (nodeDragGesture?.pointerId === event.pointerId) {
@@ -646,6 +675,7 @@
 <div
 	bind:this={container}
 	class:panning={panGesture !== null}
+	class:node-dragging={nodeDragGesture !== null}
 	class:selecting={selectionGesture !== null}
 	class:connecting={connectionDraft !== null}
 	class="graph-canvas"
@@ -708,6 +738,7 @@
 		</svg>
 
 		{#each visibleNodes as node (node.id)}
+			<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 			<article
 				class:selected={selectedIds.has(node.id)}
 				class:active={node.active}
@@ -715,7 +746,8 @@
 				class="node"
 				style:left={`${node.x}rem`}
 				style:top={`${node.y}rem`}
-				style:width={`${nodeWidth(node)}rem`}>
+				style:width={`${nodeWidth(node)}rem`}
+				onpointerdown={(event) => selectNodeBody(event, node)}>
 				<button
 					type="button"
 					class="node-header"
@@ -796,7 +828,7 @@
 		background-position: var(--camera-x, 0) var(--camera-y, 0);
 		background-size: var(--checker-size) var(--checker-size);
 		user-select: none;
-		cursor: grab;
+		cursor: default;
 	}
 
 	.graph-canvas:focus-visible {
@@ -804,6 +836,7 @@
 	}
 
 	.graph-canvas.panning,
+	.graph-canvas.node-dragging,
 	.graph-canvas.connecting {
 		cursor: grabbing;
 	}
@@ -903,10 +936,10 @@
 		color: inherit;
 		font: inherit;
 		text-align: start;
-		cursor: grab;
+		cursor: default;
 	}
 
-	.node-header:active {
+	.graph-canvas.node-dragging .node-header {
 		cursor: grabbing;
 	}
 
