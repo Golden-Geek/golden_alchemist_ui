@@ -4,6 +4,7 @@
 		GraphConnectionRequest,
 		GraphEdge,
 		GraphNode,
+		GraphNodeMove,
 		GraphNodePosition,
 		GraphSocket,
 		GraphSocketDirection,
@@ -26,11 +27,18 @@
 
 	interface NodeDragGesture {
 		pointerId: number;
-		nodeId: string;
 		startX: number;
 		startY: number;
-		nodeX: number;
-		nodeY: number;
+		nodePositions: Record<string, GraphNodePosition>;
+	}
+
+	interface SelectionGesture {
+		pointerId: number;
+		startX: number;
+		startY: number;
+		currentX: number;
+		currentY: number;
+		initialSelectedNodeIds: string[];
 	}
 
 	interface ConnectionDraft {
@@ -46,6 +54,7 @@
 		selectedNodeIds = [],
 		onSelectionChange,
 		onNodeMove,
+		onNodesMove,
 		onConnect,
 		emptyLabel = 'No nodes in this graph.'
 	}: {
@@ -53,7 +62,8 @@
 		edges: GraphEdge[];
 		selectedNodeIds?: string[];
 		onSelectionChange?: (nodeIds: string[]) => void;
-		onNodeMove?: (nodeId: string, position: GraphNodePosition) => void;
+		onNodeMove?: (nodeId: string, position: GraphNodePosition) => void | Promise<void>;
+		onNodesMove?: (moves: GraphNodeMove[]) => void | Promise<void>;
 		onConnect?: (connection: GraphConnectionRequest) => void;
 		emptyLabel?: string;
 	} = $props();
@@ -75,21 +85,53 @@
 	let viewportHeight = $state(1);
 	let panGesture = $state<PanGesture | null>(null);
 	let nodeDragGesture = $state<NodeDragGesture | null>(null);
+	let selectionGesture = $state<SelectionGesture | null>(null);
 	let connectionDraft = $state<ConnectionDraft | null>(null);
 	let dragPositions = $state<Record<string, GraphNodePosition>>({});
+	let optimisticPositions = $state<Record<string, GraphNodePosition>>({});
 	let animationFrame: number | null = null;
 
 	let selectedIds = $derived(new Set(selectedNodeIds));
 	let effectiveNodes = $derived(
 		nodes.map((node) => {
-			const dragged = dragPositions[node.id];
-			return dragged ? { ...node, ...dragged } : node;
+			const position = dragPositions[node.id] ?? optimisticPositions[node.id];
+			return position ? { ...node, ...position } : node;
 		})
 	);
 	let nodesById = $derived(new Map(effectiveNodes.map((node) => [node.id, node])));
 	let checkerCellSizePx = $derived(Math.max(8, remPx * CHECKER_CELL_REM * camera.zoom));
 	let checkerSizePx = $derived(checkerCellSizePx * 2);
 	let transformStyle = $derived(`translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`);
+	let selectionBoxStyle = $derived.by(() => {
+		if (!selectionGesture) {
+			return '';
+		}
+		const left = Math.min(selectionGesture.startX, selectionGesture.currentX);
+		const top = Math.min(selectionGesture.startY, selectionGesture.currentY);
+		const width = Math.abs(selectionGesture.currentX - selectionGesture.startX);
+		const height = Math.abs(selectionGesture.currentY - selectionGesture.startY);
+		return `left:${left}px;top:${top}px;width:${width}px;height:${height}px`;
+	});
+
+	$effect(() => {
+		let next = optimisticPositions;
+		for (const node of nodes) {
+			const optimistic = next[node.id];
+			if (
+				optimistic &&
+				Math.abs(node.x - optimistic.x) < 0.0001 &&
+				Math.abs(node.y - optimistic.y) < 0.0001
+			) {
+				if (next === optimisticPositions) {
+					next = { ...optimisticPositions };
+				}
+				delete next[node.id];
+			}
+		}
+		if (next !== optimisticPositions) {
+			optimisticPositions = next;
+		}
+	});
 
 	const clamp = (value: number, minimum: number, maximum: number): number =>
 		Math.min(maximum, Math.max(minimum, value));
@@ -283,11 +325,58 @@
 		onSelectionChange?.([...next]);
 	};
 
+	const localPointerPosition = (event: PointerEvent): { x: number; y: number } => {
+		const bounds = container?.getBoundingClientRect();
+		return {
+			x: event.clientX - (bounds?.left ?? 0),
+			y: event.clientY - (bounds?.top ?? 0)
+		};
+	};
+
+	const finishSelectionGesture = (): void => {
+		if (!selectionGesture) {
+			return;
+		}
+		const left = Math.min(selectionGesture.startX, selectionGesture.currentX);
+		const top = Math.min(selectionGesture.startY, selectionGesture.currentY);
+		const right = Math.max(selectionGesture.startX, selectionGesture.currentX);
+		const bottom = Math.max(selectionGesture.startY, selectionGesture.currentY);
+		if (right - left < 3 && bottom - top < 3) {
+			selectionGesture = null;
+			return;
+		}
+		const next = new Set(selectionGesture.initialSelectedNodeIds);
+		for (const node of effectiveNodes) {
+			const nodeLeft = camera.x + node.x * remPx * camera.zoom;
+			const nodeTop = camera.y + node.y * remPx * camera.zoom;
+			const nodeRight = nodeLeft + nodeWidth(node) * remPx * camera.zoom;
+			const nodeBottom = nodeTop + nodeHeight(node) * remPx * camera.zoom;
+			if (nodeRight >= left && nodeLeft <= right && nodeBottom >= top && nodeTop <= bottom) {
+				next.add(node.id);
+			}
+		}
+		onSelectionChange?.([...next]);
+		selectionGesture = null;
+	};
+
 	const startPan = (event: PointerEvent): void => {
 		if (event.button !== 0 && event.button !== 1) {
 			return;
 		}
 		container?.focus();
+		if (event.button === 0 && event.shiftKey) {
+			const pointer = localPointerPosition(event);
+			selectionGesture = {
+				pointerId: event.pointerId,
+				startX: pointer.x,
+				startY: pointer.y,
+				currentX: pointer.x,
+				currentY: pointer.y,
+				initialSelectedNodeIds: [...selectedIds]
+			};
+			container?.setPointerCapture(event.pointerId);
+			return;
+		}
 		if (event.button === 0) {
 			onSelectionChange?.([]);
 		}
@@ -307,14 +396,38 @@
 		}
 		event.stopPropagation();
 		container?.focus();
-		updateSelection(node.id, event.ctrlKey || event.metaKey || event.shiftKey);
+		const additive = event.ctrlKey || event.metaKey || event.shiftKey;
+		let dragIds: Set<string>;
+		if (additive) {
+			const next = new Set(selectedIds);
+			if (next.has(node.id)) {
+				next.delete(node.id);
+			} else {
+				next.add(node.id);
+			}
+			onSelectionChange?.([...next]);
+			if (!next.has(node.id)) {
+				return;
+			}
+			dragIds = next;
+		} else if (selectedIds.has(node.id)) {
+			dragIds = new Set(selectedIds);
+		} else {
+			updateSelection(node.id, false);
+			dragIds = new Set([node.id]);
+		}
+		const nodePositions: Record<string, GraphNodePosition> = {};
+		for (const dragId of dragIds) {
+			const dragNode = nodesById.get(dragId);
+			if (dragNode) {
+				nodePositions[dragId] = { x: dragNode.x, y: dragNode.y };
+			}
+		}
 		nodeDragGesture = {
 			pointerId: event.pointerId,
-			nodeId: node.id,
 			startX: event.clientX,
 			startY: event.clientY,
-			nodeX: node.x,
-			nodeY: node.y
+			nodePositions
 		};
 		container?.setPointerCapture(event.pointerId);
 	};
@@ -350,6 +463,15 @@
 	};
 
 	const handlePointerMove = (event: PointerEvent): void => {
+		if (selectionGesture?.pointerId === event.pointerId) {
+			const pointer = localPointerPosition(event);
+			selectionGesture = {
+				...selectionGesture,
+				currentX: pointer.x,
+				currentY: pointer.y
+			};
+			return;
+		}
 		if (panGesture?.pointerId === event.pointerId) {
 			camera = {
 				...camera,
@@ -359,13 +481,16 @@
 			return;
 		}
 		if (nodeDragGesture?.pointerId === event.pointerId) {
-			dragPositions = {
-				...dragPositions,
-				[nodeDragGesture.nodeId]: {
-					x: nodeDragGesture.nodeX + (event.clientX - nodeDragGesture.startX) / camera.zoom / remPx,
-					y: nodeDragGesture.nodeY + (event.clientY - nodeDragGesture.startY) / camera.zoom / remPx
-				}
-			};
+			const deltaX = (event.clientX - nodeDragGesture.startX) / camera.zoom / remPx;
+			const deltaY = (event.clientY - nodeDragGesture.startY) / camera.zoom / remPx;
+			const nextPositions: Record<string, GraphNodePosition> = {};
+			for (const [nodeId, position] of Object.entries(nodeDragGesture.nodePositions)) {
+				nextPositions[nodeId] = {
+					x: position.x + deltaX,
+					y: position.y + deltaY
+				};
+			}
+			dragPositions = nextPositions;
 			return;
 		}
 		if (connectionDraft?.pointerId === event.pointerId) {
@@ -374,17 +499,51 @@
 		}
 	};
 
+	const clearOptimisticMoves = (moves: GraphNodeMove[]): void => {
+		const next = { ...optimisticPositions };
+		let changed = false;
+		for (const move of moves) {
+			const pending = next[move.nodeId];
+			if (pending?.x === move.position.x && pending?.y === move.position.y) {
+				delete next[move.nodeId];
+				changed = true;
+			}
+		}
+		if (changed) {
+			optimisticPositions = next;
+		}
+	};
+
+	const commitNodeMoves = (moves: GraphNodeMove[]): void => {
+		optimisticPositions = {
+			...optimisticPositions,
+			...Object.fromEntries(moves.map((move) => [move.nodeId, move.position]))
+		};
+		try {
+			const result = onNodesMove
+				? onNodesMove(moves)
+				: Promise.all(moves.map((move) => onNodeMove?.(move.nodeId, move.position)));
+			void Promise.resolve(result).catch(() => clearOptimisticMoves(moves));
+		} catch {
+			clearOptimisticMoves(moves);
+		}
+	};
+
 	const handlePointerEnd = (event: PointerEvent): void => {
+		if (selectionGesture?.pointerId === event.pointerId) {
+			finishSelectionGesture();
+		}
 		if (panGesture?.pointerId === event.pointerId) {
 			panGesture = null;
 		}
 		if (nodeDragGesture?.pointerId === event.pointerId) {
-			const position = dragPositions[nodeDragGesture.nodeId];
-			if (position) {
-				onNodeMove?.(nodeDragGesture.nodeId, position);
-				const { [nodeDragGesture.nodeId]: _, ...remaining } = dragPositions;
-				dragPositions = remaining;
+			const moves = Object.entries(dragPositions).map(
+				([nodeId, position]): GraphNodeMove => ({ nodeId, position })
+			);
+			if (moves.length > 0) {
+				commitNodeMoves(moves);
 			}
+			dragPositions = {};
 			nodeDragGesture = null;
 		}
 		if (connectionDraft?.pointerId === event.pointerId) {
@@ -445,6 +604,7 @@
 <div
 	bind:this={container}
 	class:panning={panGesture !== null}
+	class:selecting={selectionGesture !== null}
 	class:connecting={connectionDraft !== null}
 	class="graph-canvas"
 	role="application"
@@ -553,6 +713,10 @@
 		{/each}
 	</div>
 
+	{#if selectionGesture}
+		<div class="selection-box" style={selectionBoxStyle}></div>
+	{/if}
+
 	{#if nodes.length === 0}
 		<p class="empty">{emptyLabel}</p>
 	{/if}
@@ -602,6 +766,10 @@
 		cursor: grabbing;
 	}
 
+	.graph-canvas.selecting {
+		cursor: crosshair;
+	}
+
 	.world {
 		position: absolute;
 		inset: 0 auto auto 0;
@@ -637,6 +805,15 @@
 	.wires path.draft {
 		stroke: var(--ga-selection);
 		stroke-dasharray: 0.45rem 0.25rem;
+	}
+
+	.selection-box {
+		position: absolute;
+		z-index: 15;
+		box-sizing: border-box;
+		border: solid 0.08rem color-mix(in srgb, var(--ga-selection) 82%, transparent);
+		background: color-mix(in srgb, var(--ga-selection) 14%, transparent);
+		pointer-events: none;
 	}
 
 	.node {

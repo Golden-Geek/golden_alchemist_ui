@@ -43,3 +43,8 @@ export interface GraphNodePosition {
 	x: number;
 	y: number;
 }
+
+export interface GraphNodeMove {
+	nodeId: string;
+	position: GraphNodePosition;
+}

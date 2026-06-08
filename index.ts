@@ -3,6 +3,7 @@ export type {
 	GraphConnectionRequest,
 	GraphEdge,
 	GraphNode,
+	GraphNodeMove,
 	GraphNodePosition,
 	GraphSocket,
 	GraphSocketDirection,
