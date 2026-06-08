@@ -97,8 +97,29 @@
 	const nodeHeight = (node: GraphNode): number =>
 		Math.max(
 			NODE_HEADER_REM + 1.2,
-			SOCKET_START_REM + Math.max(node.inputs.length, node.outputs.length, 1) * SOCKET_ROW_REM
+			NODE_HEADER_REM + 1.4 + Math.max(node.inputs.length, node.outputs.length, 1) * SOCKET_ROW_REM
 		);
+
+	let visibleNodes = $derived.by(() => {
+		const margin = 8;
+		const left = -camera.x / camera.zoom / remPx - margin;
+		const top = -camera.y / camera.zoom / remPx - margin;
+		const right = (viewportWidth - camera.x) / camera.zoom / remPx + margin;
+		const bottom = (viewportHeight - camera.y) / camera.zoom / remPx + margin;
+		return effectiveNodes.filter(
+			(node) =>
+				node.x + nodeWidth(node) >= left &&
+				node.x <= right &&
+				node.y + nodeHeight(node) >= top &&
+				node.y <= bottom
+		);
+	});
+	let visibleNodeIds = $derived(new Set(visibleNodes.map((node) => node.id)));
+	let visibleEdges = $derived(
+		edges.filter(
+			(edge) => visibleNodeIds.has(edge.from.nodeId) || visibleNodeIds.has(edge.to.nodeId)
+		)
+	);
 
 	const socketIndex = (
 		node: GraphNode,
@@ -407,6 +428,8 @@
 	aria-label="Node graph"
 	tabindex="0"
 	style:--grid-size={`${gridSizePx}px`}
+	style:--camera-x={`${camera.x}px`}
+	style:--camera-y={`${camera.y}px`}
 	onpointerdown={startPan}
 	onpointermove={handlePointerMove}
 	onpointerup={handlePointerEnd}
@@ -421,7 +444,7 @@
 
 	<div class="world" style:transform={transformStyle}>
 		<svg class="wires" aria-hidden="true">
-			{#each edges as edge, index (`${edge.id ?? index}:${edge.from.nodeId}:${edge.to.nodeId}`)}
+			{#each visibleEdges as edge, index (`${edge.id ?? index}:${edge.from.nodeId}:${edge.to.nodeId}`)}
 				{@const path = edgePath(edge)}
 				{#if path}
 					<path
@@ -436,7 +459,7 @@
 			{/if}
 		</svg>
 
-		{#each effectiveNodes as node (node.id)}
+		{#each visibleNodes as node (node.id)}
 			<article
 				class:selected={selectedIds.has(node.id)}
 				class:active={node.active}
