@@ -18,6 +18,7 @@ export interface GraphNode {
 	id: string;
 	label: string;
 	subtitle?: string;
+	socketPlacement?: 'body' | 'header';
 	x: number;
 	y: number;
 	width?: number;
@@ -38,6 +39,7 @@ export interface GraphEdge {
 	id?: string;
 	from: GraphSocketRef;
 	to: GraphSocketRef;
+	color?: string;
 	active?: boolean;
 	invalid?: boolean;
 }

@@ -55,17 +55,36 @@
 		endY: number;
 	}
 
+	interface RoutingObstacle {
+		left: number;
+		top: number;
+		right: number;
+		bottom: number;
+	}
+
+	interface RoutingState {
+		x: number;
+		y: number;
+		direction: number;
+		cost: number;
+		estimate: number;
+		key: string;
+	}
+
 	let {
 		nodes,
 		edges,
 		selectedNodeIds = [],
+		selectedEdgeIds = [],
 		onSelectionChange,
+		onEdgeSelectionChange,
 		onNodeMove,
 		onNodesMove,
 		onNodeResize,
 		onConnect,
 		nodeContent,
 		onBackgroundContextMenu,
+		routeEdgesAroundNodes = false,
 		initialCamera,
 		onCameraChange,
 		emptyLabel = 'No nodes in this graph.'
@@ -73,13 +92,16 @@
 		nodes: GraphNode[];
 		edges: GraphEdge[];
 		selectedNodeIds?: string[];
+		selectedEdgeIds?: string[];
 		onSelectionChange?: (nodeIds: string[]) => void;
+		onEdgeSelectionChange?: (edgeIds: string[]) => void;
 		onNodeMove?: (nodeId: string, position: GraphNodePosition) => void | Promise<void>;
 		onNodesMove?: (moves: GraphNodeMove[]) => void | Promise<void>;
 		onNodeResize?: (resize: GraphNodeResize) => void | Promise<void>;
 		onConnect?: (connection: GraphConnectionRequest) => void;
 		nodeContent?: Snippet<[GraphNode]>;
 		onBackgroundContextMenu?: (event: MouseEvent, position: GraphNodePosition) => void;
+		routeEdgesAroundNodes?: boolean;
 		initialCamera?: GraphCamera;
 		onCameraChange?: (camera: GraphCamera) => void;
 		emptyLabel?: string;
@@ -93,8 +115,15 @@
 	const NODE_HEADER_REM = 1.8;
 	const SOCKET_ROW_REM = 1.45;
 	const SOCKET_START_REM = 2.05;
+	const HEADER_SOCKET_INSET_REM = 0.47;
 	const FRAME_PADDING_REM = 3;
 	const CAMERA_ANIMATION_MS = 240;
+	const ROUTING_GRID_REM = 1;
+	const ROUTING_CLEARANCE_REM = 0.7;
+	const ROUTING_MARGIN_REM = 16;
+	const ROUTING_BUCKET_REM = 16;
+	const ROUTING_MAX_VISITS = 24_000;
+	const ROUTING_TURN_COST = 0.35;
 
 	const finiteNumber = (value: number | undefined, fallback: number): number =>
 		typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -123,8 +152,10 @@
 	let resizeSizes = $state<Record<string, GraphNodeSize>>({});
 	let optimisticSizes = $state<Record<string, GraphNodeSize>>({});
 	let animationFrame: number | null = null;
+	const routedPathCache = new Map<string, string>();
 
 	let selectedIds = $derived(new Set(selectedNodeIds));
+	let selectedEdgeIdSet = $derived(new Set(selectedEdgeIds));
 	let effectiveNodes = $derived(
 		nodes.map((node) => {
 			const position = dragPositions[node.id] ?? optimisticPositions[node.id];
@@ -209,13 +240,31 @@
 		Math.max(MIN_NODE_WIDTH_REM, node.width ?? DEFAULT_NODE_WIDTH_REM);
 
 	const minimumNodeHeight = (node: GraphNode): number =>
-		Math.max(
-			NODE_HEADER_REM + 1.2,
-			NODE_HEADER_REM + 1.4 + Math.max(node.inputs.length, node.outputs.length, 1) * SOCKET_ROW_REM
-		);
+		node.socketPlacement === 'header'
+			? NODE_HEADER_REM + 1.2
+			: Math.max(
+					NODE_HEADER_REM + 1.2,
+					NODE_HEADER_REM +
+						1.4 +
+						Math.max(node.inputs.length, node.outputs.length, 1) * SOCKET_ROW_REM
+				);
 
 	const nodeHeight = (node: GraphNode): number =>
 		Math.max(minimumNodeHeight(node), node.height ?? minimumNodeHeight(node));
+
+	let routingGeometryKey = $derived(
+		`${remPx}:${effectiveNodes
+			.map(
+				(node) =>
+					`${node.id}:${node.x}:${node.y}:${nodeWidth(node)}:${nodeHeight(node)}:${node.socketPlacement ?? 'body'}`
+			)
+			.join('|')}`
+	);
+
+	$effect(() => {
+		routingGeometryKey;
+		routedPathCache.clear();
+	});
 
 	let visibleNodes = $derived.by(() => {
 		const margin = 8;
@@ -237,6 +286,37 @@
 			(edge) => visibleNodeIds.has(edge.from.nodeId) || visibleNodeIds.has(edge.to.nodeId)
 		)
 	);
+	let routingObstacles = $derived.by((): RoutingObstacle[] => {
+		const clearance = ROUTING_CLEARANCE_REM * remPx;
+		return effectiveNodes.map((node) => ({
+			left: node.x * remPx - clearance,
+			top: node.y * remPx - clearance,
+			right: (node.x + nodeWidth(node)) * remPx + clearance,
+			bottom: (node.y + nodeHeight(node)) * remPx + clearance
+		}));
+	});
+	let routingObstacleBuckets = $derived.by(() => {
+		const buckets = new Map<string, RoutingObstacle[]>();
+		const bucketSize = ROUTING_BUCKET_REM * remPx;
+		for (const obstacle of routingObstacles) {
+			const firstX = Math.floor(obstacle.left / bucketSize);
+			const lastX = Math.floor(obstacle.right / bucketSize);
+			const firstY = Math.floor(obstacle.top / bucketSize);
+			const lastY = Math.floor(obstacle.bottom / bucketSize);
+			for (let bucketX = firstX; bucketX <= lastX; bucketX += 1) {
+				for (let bucketY = firstY; bucketY <= lastY; bucketY += 1) {
+					const key = `${bucketX}:${bucketY}`;
+					const entries = buckets.get(key);
+					if (entries) {
+						entries.push(obstacle);
+					} else {
+						buckets.set(key, [obstacle]);
+					}
+				}
+			}
+		}
+		return buckets;
+	});
 
 	const socketIndex = (
 		node: GraphNode,
@@ -258,6 +338,17 @@
 		if (!node) {
 			return null;
 		}
+		if (node.socketPlacement === 'header') {
+			return {
+				x:
+					(node.x +
+						(direction === 'output'
+							? nodeWidth(node) - HEADER_SOCKET_INSET_REM
+							: HEADER_SOCKET_INSET_REM)) *
+					remPx,
+				y: (node.y + NODE_HEADER_REM * 0.5) * remPx
+			};
+		}
 		return {
 			x: (node.x + (direction === 'output' ? nodeWidth(node) : 0)) * remPx,
 			y:
@@ -274,10 +365,230 @@
 		return `M ${start.x} ${start.y} C ${start.x + control} ${start.y}, ${end.x - control} ${end.y}, ${end.x} ${end.y}`;
 	};
 
+	const routingPointBlocked = (x: number, y: number): boolean => {
+		const bucketSize = ROUTING_BUCKET_REM * remPx;
+		const obstacles =
+			routingObstacleBuckets.get(`${Math.floor(x / bucketSize)}:${Math.floor(y / bucketSize)}`) ??
+			[];
+		return obstacles.some(
+			(obstacle) =>
+				x >= obstacle.left && x <= obstacle.right && y >= obstacle.top && y <= obstacle.bottom
+		);
+	};
+
+	const routingStateKey = (x: number, y: number, direction: number): string =>
+		`${x}:${y}:${direction}`;
+
+	const heapPush = (heap: RoutingState[], state: RoutingState): void => {
+		heap.push(state);
+		let index = heap.length - 1;
+		while (index > 0) {
+			const parent = Math.floor((index - 1) * 0.5);
+			if (heap[parent].estimate <= state.estimate) {
+				break;
+			}
+			heap[index] = heap[parent];
+			index = parent;
+		}
+		heap[index] = state;
+	};
+
+	const heapPop = (heap: RoutingState[]): RoutingState | null => {
+		const first = heap[0];
+		const last = heap.pop();
+		if (!first || !last || heap.length === 0) {
+			return first ?? null;
+		}
+		let index = 0;
+		while (true) {
+			const left = index * 2 + 1;
+			const right = left + 1;
+			if (left >= heap.length) {
+				break;
+			}
+			const child =
+				right < heap.length && heap[right].estimate < heap[left].estimate ? right : left;
+			if (heap[child].estimate >= last.estimate) {
+				break;
+			}
+			heap[index] = heap[child];
+			index = child;
+		}
+		heap[index] = last;
+		return first;
+	};
+
+	const simplifyRoute = (points: GraphNodePosition[]): GraphNodePosition[] => {
+		const unique = points.filter(
+			(point, index) =>
+				index === 0 || point.x !== points[index - 1].x || point.y !== points[index - 1].y
+		);
+		if (unique.length < 3) {
+			return unique;
+		}
+		const simplified = [unique[0]];
+		for (let index = 1; index < unique.length - 1; index += 1) {
+			const previous = simplified[simplified.length - 1];
+			const current = unique[index];
+			const next = unique[index + 1];
+			if (
+				(previous.x === current.x && current.x === next.x) ||
+				(previous.y === current.y && current.y === next.y)
+			) {
+				continue;
+			}
+			simplified.push(current);
+		}
+		simplified.push(unique.at(-1) ?? unique[0]);
+		return simplified;
+	};
+
+	const findOrthogonalRoute = (
+		start: GraphNodePosition,
+		end: GraphNodePosition
+	): GraphNodePosition[] | null => {
+		const grid = ROUTING_GRID_REM * remPx;
+		const margin = ROUTING_MARGIN_REM * remPx;
+		const sourceX = Math.ceil(start.x / grid);
+		const sourceY = Math.round(start.y / grid);
+		const targetX = Math.floor(end.x / grid);
+		const targetY = Math.round(end.y / grid);
+		const minX = Math.floor((Math.min(start.x, end.x) - margin) / grid);
+		const maxX = Math.ceil((Math.max(start.x, end.x) + margin) / grid);
+		const minY = Math.floor((Math.min(start.y, end.y) - margin) / grid);
+		const maxY = Math.ceil((Math.max(start.y, end.y) + margin) / grid);
+		const directions = [
+			{ x: 1, y: 0 },
+			{ x: 0, y: 1 },
+			{ x: -1, y: 0 },
+			{ x: 0, y: -1 }
+		];
+		const open: RoutingState[] = [];
+		const costs = new Map<string, number>();
+		const parents = new Map<string, string>();
+		const states = new Map<string, RoutingState>();
+		const startState: RoutingState = {
+			x: sourceX,
+			y: sourceY,
+			direction: -1,
+			cost: 0,
+			estimate: Math.abs(targetX - sourceX) + Math.abs(targetY - sourceY),
+			key: routingStateKey(sourceX, sourceY, -1)
+		};
+		costs.set(startState.key, 0);
+		states.set(startState.key, startState);
+		heapPush(open, startState);
+
+		let visits = 0;
+		let goal: RoutingState | null = null;
+		while (open.length > 0 && visits < ROUTING_MAX_VISITS) {
+			const current = heapPop(open);
+			if (!current || current.cost !== costs.get(current.key)) {
+				continue;
+			}
+			visits += 1;
+			if (current.x === targetX && current.y === targetY) {
+				goal = current;
+				break;
+			}
+			for (let direction = 0; direction < directions.length; direction += 1) {
+				const nextX = current.x + directions[direction].x;
+				const nextY = current.y + directions[direction].y;
+				if (nextX < minX || nextX > maxX || nextY < minY || nextY > maxY) {
+					continue;
+				}
+				if (routingPointBlocked(nextX * grid, nextY * grid)) {
+					continue;
+				}
+				const turnCost =
+					current.direction >= 0 && current.direction !== direction ? ROUTING_TURN_COST : 0;
+				const nextCost = current.cost + 1 + turnCost;
+				const key = routingStateKey(nextX, nextY, direction);
+				if (nextCost >= (costs.get(key) ?? Number.POSITIVE_INFINITY)) {
+					continue;
+				}
+				const next: RoutingState = {
+					x: nextX,
+					y: nextY,
+					direction,
+					cost: nextCost,
+					estimate: nextCost + Math.abs(targetX - nextX) + Math.abs(targetY - nextY),
+					key
+				};
+				costs.set(key, nextCost);
+				parents.set(key, current.key);
+				states.set(key, next);
+				heapPush(open, next);
+			}
+		}
+		if (!goal) {
+			return null;
+		}
+		const points: GraphNodePosition[] = [];
+		let key: string | undefined = goal.key;
+		while (key) {
+			const state = states.get(key);
+			if (!state) {
+				break;
+			}
+			points.push({ x: state.x * grid, y: state.y * grid });
+			key = parents.get(key);
+		}
+		points.reverse();
+		return simplifyRoute(points);
+	};
+
+	const routedWirePath = (
+		edge: GraphEdge,
+		start: GraphNodePosition,
+		end: GraphNodePosition
+	): string | null => {
+		const sourceNode = nodesById.get(edge.from.nodeId);
+		const targetNode = nodesById.get(edge.to.nodeId);
+		if (!sourceNode || !targetNode || sourceNode.id === targetNode.id) {
+			return null;
+		}
+		const grid = ROUTING_GRID_REM * remPx;
+		const clearance = ROUTING_CLEARANCE_REM * remPx;
+		const routeStart = {
+			x:
+				Math.ceil(((sourceNode.x + nodeWidth(sourceNode)) * remPx + clearance) / grid) * grid +
+				grid,
+			y: start.y
+		};
+		const routeEnd = {
+			x: Math.floor((targetNode.x * remPx - clearance) / grid) * grid - grid,
+			y: end.y
+		};
+		const gridStart = { x: routeStart.x, y: Math.round(routeStart.y / grid) * grid };
+		const gridEnd = { x: routeEnd.x, y: Math.round(routeEnd.y / grid) * grid };
+		const middle = findOrthogonalRoute(gridStart, gridEnd);
+		if (!middle) {
+			return null;
+		}
+		const points = simplifyRoute([start, routeStart, gridStart, ...middle, gridEnd, routeEnd, end]);
+		return points
+			.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`)
+			.join(' ');
+	};
+
 	const edgePath = (edge: GraphEdge): string | null => {
 		const start = socketPoint(edge.from, 'output');
 		const end = socketPoint(edge.to, 'input');
-		return start && end ? wirePath(start, end) : null;
+		if (!start || !end) {
+			return null;
+		}
+		if (!routeEdgesAroundNodes) {
+			return wirePath(start, end);
+		}
+		const cacheKey = `${edge.id ?? ''}:${edge.from.nodeId}:${edge.from.socketId}:${edge.to.nodeId}:${edge.to.socketId}`;
+		const cached = routedPathCache.get(cacheKey);
+		if (cached) {
+			return cached;
+		}
+		const path = routedWirePath(edge, start, end) ?? wirePath(start, end);
+		routedPathCache.set(cacheKey, path);
+		return path;
 	};
 
 	const draftPath = (): string | null => {
@@ -425,6 +736,38 @@
 			next.add(nodeId);
 		}
 		onSelectionChange?.([...next]);
+	};
+
+	const updateEdgeSelection = (edge: GraphEdge, additive: boolean): void => {
+		if (!edge.id) {
+			return;
+		}
+		const next = additive ? new Set(selectedEdgeIdSet) : new Set<string>();
+		if (additive && next.has(edge.id)) {
+			next.delete(edge.id);
+		} else {
+			next.add(edge.id);
+		}
+		onEdgeSelectionChange?.([...next]);
+	};
+
+	const selectEdge = (event: PointerEvent, edge: GraphEdge): void => {
+		if (event.button !== 0) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		container?.focus();
+		updateEdgeSelection(edge, event.ctrlKey || event.metaKey || event.shiftKey);
+	};
+
+	const selectEdgeWithKeyboard = (event: KeyboardEvent, edge: GraphEdge): void => {
+		if (event.key !== 'Enter' && event.key !== ' ') {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		updateEdgeSelection(edge, event.ctrlKey || event.metaKey || event.shiftKey);
 	};
 
 	const localPointerPosition = (event: PointerEvent): { x: number; y: number } => {
@@ -890,14 +1233,27 @@
 	</div>
 
 	<div class="world" style:transform={transformStyle}>
-		<svg class="wires" aria-hidden="true">
+		<svg class="wires" aria-label="Graph connections">
 			{#each visibleEdges as edge, index (`${edge.id ?? index}:${edge.from.nodeId}:${edge.to.nodeId}`)}
 				{@const path = edgePath(edge)}
 				{#if path}
 					<path
 						d={path}
+						class="edge-hit"
+						role="button"
+						tabindex="0"
+						aria-label="Select connection"
+						aria-pressed={edge.id !== undefined && selectedEdgeIdSet.has(edge.id)}
+						vector-effect="non-scaling-stroke"
+						onpointerdown={(event) => selectEdge(event, edge)}
+						onkeydown={(event) => selectEdgeWithKeyboard(event, edge)} />
+					<path
+						d={path}
+						class="edge"
 						class:active={edge.active}
 						class:invalid={edge.invalid}
+						class:selected={edge.id !== undefined && selectedEdgeIdSet.has(edge.id)}
+						style:--edge-color={edge.color}
 						vector-effect="non-scaling-stroke" />
 				{/if}
 			{/each}
@@ -918,21 +1274,14 @@
 				style:width={`${nodeWidth(node)}rem`}
 				style:height={`${nodeHeight(node)}rem`}
 				onpointerdown={(event) => selectNodeBody(event, node)}>
-				<button
-					type="button"
-					class="node-header"
-					onpointerdown={(event) => startNodeDrag(event, node)}>
-					<strong>{node.label}</strong>
-					{#if node.subtitle}<small>{node.subtitle}</small>{/if}
-				</button>
-				<div class="node-body">
-					<div class="socket-columns">
-						<div class="socket-list inputs">
+				<div class="node-header">
+					{#if node.socketPlacement === 'header'}
+						<div class="header-socket-list inputs">
 							{#each node.inputs as socket (socket.id)}
 								<button
 									type="button"
 									class:incompatible={socket.compatible === false}
-									class="socket input"
+									class="socket header-socket input"
 									data-node-id={node.id}
 									data-socket-id={socket.id}
 									title={socket.valueType ?? socket.label}
@@ -943,12 +1292,21 @@
 								</button>
 							{/each}
 						</div>
-						<div class="socket-list outputs">
+					{/if}
+					<button
+						type="button"
+						class="node-title"
+						onpointerdown={(event) => startNodeDrag(event, node)}>
+						<strong>{node.label}</strong>
+						{#if node.subtitle}<small>{node.subtitle}</small>{/if}
+					</button>
+					{#if node.socketPlacement === 'header'}
+						<div class="header-socket-list outputs">
 							{#each node.outputs as socket (socket.id)}
 								<button
 									type="button"
 									class:incompatible={socket.compatible === false}
-									class="socket output"
+									class="socket header-socket output"
 									title={socket.valueType ?? socket.label}
 									onpointerdown={(event) => startConnection(event, node.id, socket)}>
 									<span>{socket.label}</span>
@@ -957,7 +1315,43 @@
 								</button>
 							{/each}
 						</div>
-					</div>
+					{/if}
+				</div>
+				<div class="node-body">
+					{#if node.socketPlacement !== 'header'}
+						<div class="socket-columns">
+							<div class="socket-list inputs">
+								{#each node.inputs as socket (socket.id)}
+									<button
+										type="button"
+										class:incompatible={socket.compatible === false}
+										class="socket input"
+										data-node-id={node.id}
+										data-socket-id={socket.id}
+										title={socket.valueType ?? socket.label}
+										onpointerup={(event) => finishConnection(event, node.id, socket)}>
+										<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}
+										></span>
+										<span>{socket.label}</span>
+									</button>
+								{/each}
+							</div>
+							<div class="socket-list outputs">
+								{#each node.outputs as socket (socket.id)}
+									<button
+										type="button"
+										class:incompatible={socket.compatible === false}
+										class="socket output"
+										title={socket.valueType ?? socket.label}
+										onpointerdown={(event) => startConnection(event, node.id, socket)}>
+										<span>{socket.label}</span>
+										<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}
+										></span>
+									</button>
+								{/each}
+							</div>
+						</div>
+					{/if}
 					{#if nodeContent}
 						<div class="node-content" data-no-node-select>
 							{@render nodeContent(node)}
@@ -1052,18 +1446,39 @@
 
 	.wires path {
 		fill: none;
-		stroke: color-mix(in srgb, var(--ga-socket) 72%, transparent);
-		stroke-width: 0.16rem;
 	}
 
-	.wires path.active {
-		stroke: var(--ga-active);
+	.wires path.edge {
+		stroke: color-mix(in srgb, var(--ga-socket) 72%, transparent);
+		stroke-width: 0.16rem;
+		pointer-events: none;
+	}
+
+	.wires path.edge.active {
+		stroke: var(--edge-color, var(--ga-active));
 		filter: drop-shadow(0 0 0.22rem color-mix(in srgb, var(--ga-active) 65%, transparent));
 	}
 
-	.wires path.invalid {
+	.wires path.edge:not(.active) {
+		stroke: var(--edge-color, color-mix(in srgb, var(--ga-socket) 72%, transparent));
+	}
+
+	.wires path.edge.selected {
+		stroke: var(--ga-selection);
+		stroke-width: 0.25rem;
+		filter: drop-shadow(0 0 0.24rem color-mix(in srgb, var(--ga-selection) 72%, transparent));
+	}
+
+	.wires path.edge.invalid {
 		stroke: var(--ga-error);
 		stroke-dasharray: 0.4rem 0.3rem;
+	}
+
+	.wires path.edge-hit {
+		stroke: transparent;
+		stroke-width: 0.85rem;
+		pointer-events: stroke;
+		cursor: pointer;
 	}
 
 	.wires path.draft {
@@ -1107,24 +1522,34 @@
 	}
 
 	.node-header {
+		position: relative;
 		display: flex;
-		flex-direction: column;
+		align-items: stretch;
 		inline-size: 100%;
-		justify-content: center;
 		min-block-size: 1.8rem;
-		padding: 0.25rem 0.62rem;
 		box-sizing: border-box;
-		border: 0;
 		border-block-end: solid 0.06rem color-mix(in srgb, var(--ga-outline) 55%, transparent);
 		border-radius: 0.48rem 0.48rem 0 0;
 		background: color-mix(in srgb, var(--ga-outline) 12%, var(--ga-node));
+		color: inherit;
+	}
+
+	.node-title {
+		display: flex;
+		flex: 1 1 auto;
+		flex-direction: column;
+		justify-content: center;
+		min-inline-size: 0;
+		padding: 0.25rem 0.35rem;
+		border: 0;
+		background: transparent;
 		color: inherit;
 		font: inherit;
 		text-align: start;
 		cursor: default;
 	}
 
-	.graph-canvas.node-dragging .node-header {
+	.graph-canvas.node-dragging .node-title {
 		cursor: grabbing;
 	}
 
@@ -1146,6 +1571,35 @@
 	.node small {
 		font-size: 0.64rem;
 		opacity: 0.62;
+	}
+
+	.header-socket-list {
+		display: flex;
+		flex: 0 0 auto;
+		align-items: stretch;
+		min-inline-size: 0;
+	}
+
+	.header-socket {
+		block-size: 100%;
+		min-block-size: 1.72rem;
+		font-size: 0.64rem;
+	}
+
+	.header-socket.input {
+		padding-inline: 0.96rem 0.12rem;
+	}
+
+	.header-socket.output {
+		padding-inline: 0.12rem 0.96rem;
+	}
+
+	.header-socket.input .pin {
+		inset-inline-start: 0.08rem;
+	}
+
+	.header-socket.output .pin {
+		inset-inline-end: 0.08rem;
 	}
 
 	.node-body {
