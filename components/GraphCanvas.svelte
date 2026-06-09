@@ -53,6 +53,8 @@
 		from: GraphSocketRef;
 		endX: number;
 		endY: number;
+		snapNodeId?: string;
+		snapSocketId?: string;
 	}
 
 	interface RoutingObstacle {
@@ -85,6 +87,7 @@
 		nodeContent,
 		onBackgroundContextMenu,
 		routeEdgesAroundNodes = false,
+		socketLabels = 'hover',
 		initialCamera,
 		onCameraChange,
 		emptyLabel = 'No nodes in this graph.'
@@ -102,6 +105,7 @@
 		nodeContent?: Snippet<[GraphNode]>;
 		onBackgroundContextMenu?: (event: MouseEvent, position: GraphNodePosition) => void;
 		routeEdgesAroundNodes?: boolean;
+		socketLabels?: 'always' | 'hover' | 'never';
 		initialCamera?: GraphCamera;
 		onCameraChange?: (camera: GraphCamera) => void;
 		emptyLabel?: string;
@@ -286,6 +290,14 @@
 			(edge) => visibleNodeIds.has(edge.from.nodeId) || visibleNodeIds.has(edge.to.nodeId)
 		)
 	);
+	let connectedSockets = $derived(
+		new Set(
+			edges.flatMap((edge) => [
+				`${edge.from.nodeId}:${edge.from.socketId}`,
+				`${edge.to.nodeId}:${edge.to.socketId}`
+			])
+		)
+	);
 	let routingObstacles = $derived.by((): RoutingObstacle[] => {
 		const clearance = ROUTING_CLEARANCE_REM * remPx;
 		return effectiveNodes.map((node) => ({
@@ -443,6 +455,109 @@
 		return simplified;
 	};
 
+	const pointInRect = (x: number, y: number, left: number, top: number, right: number, bottom: number) => 
+		x > left && x < right && y > top && y < bottom;
+
+	const lineIntersectsAnyObstacle = (x0: number, y0: number, x1: number, y1: number): boolean => {
+		const minX = Math.min(x0, x1);
+		const maxX = Math.max(x0, x1);
+		const minY = Math.min(y0, y1);
+		const maxY = Math.max(y0, y1);
+
+		for (const obstacle of routingObstacles) {
+			if (maxX <= obstacle.left || minX >= obstacle.right || maxY <= obstacle.top || minY >= obstacle.bottom) {
+				continue;
+			}
+			if (pointInRect(x0, y0, obstacle.left, obstacle.top, obstacle.right, obstacle.bottom) ||
+				pointInRect(x1, y1, obstacle.left, obstacle.top, obstacle.right, obstacle.bottom)) {
+				return true;
+			}
+			
+			const dx = x1 - x0;
+			const dy = y1 - y0;
+			if (dx === 0 || dy === 0) {
+				if (dy === 0 && y0 > obstacle.top && y0 < obstacle.bottom && minX < obstacle.right && maxX > obstacle.left) return true;
+				if (dx === 0 && x0 > obstacle.left && x0 < obstacle.right && minY < obstacle.bottom && maxY > obstacle.top) return true;
+				continue;
+			}
+
+			const checkLine = (x3: number, y3: number, x4: number, y4: number) => {
+				const den = (x0 - x1) * (y3 - y4) - (y0 - y1) * (x3 - x4);
+				if (den === 0) return false;
+				const t = ((x0 - x3) * (y3 - y4) - (y0 - y3) * (x3 - x4)) / den;
+				const u = -((x0 - x1) * (y0 - y3) - (y0 - y1) * (x0 - x3)) / den;
+				return t > 0 && t < 1 && u > 0 && u < 1;
+			};
+
+			if (checkLine(obstacle.left, obstacle.top, obstacle.right, obstacle.top) ||
+				checkLine(obstacle.right, obstacle.top, obstacle.right, obstacle.bottom) ||
+				checkLine(obstacle.right, obstacle.bottom, obstacle.left, obstacle.bottom) ||
+				checkLine(obstacle.left, obstacle.bottom, obstacle.left, obstacle.top)) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	const smoothRoute = (points: GraphNodePosition[]): GraphNodePosition[] => {
+		if (points.length <= 2) return points;
+		
+		const smoothed: GraphNodePosition[] = [points[0]];
+		let currentIndex = 0;
+		
+		while (currentIndex < points.length - 1) {
+			let furthestVisibleIndex = currentIndex + 1;
+			
+			for (let i = currentIndex + 2; i < points.length; i++) {
+				if (!lineIntersectsAnyObstacle(points[currentIndex].x, points[currentIndex].y, points[i].x, points[i].y)) {
+					furthestVisibleIndex = i;
+				}
+			}
+			
+			smoothed.push(points[furthestVisibleIndex]);
+			currentIndex = furthestVisibleIndex;
+		}
+		
+		return smoothed;
+	};
+
+	const roundedPath = (points: GraphNodePosition[], radius: number): string => {
+		if (points.length < 3) {
+			return points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
+		}
+		let path = `M ${points[0].x} ${points[0].y}`;
+		for (let i = 1; i < points.length - 1; i++) {
+			const prev = points[i - 1];
+			const curr = points[i];
+			const next = points[i + 1];
+
+			const dPrev = Math.hypot(curr.x - prev.x, curr.y - prev.y);
+			const dNext = Math.hypot(next.x - curr.x, next.y - curr.y);
+			
+			if (dPrev < 0.1 || dNext < 0.1) {
+				path += ` L ${curr.x} ${curr.y}`;
+				continue;
+			}
+			
+			const r = Math.min(radius, dPrev / 2, dNext / 2);
+			
+			if (r <= 0.1) {
+				path += ` L ${curr.x} ${curr.y}`;
+				continue;
+			}
+			
+			const startX = curr.x - (curr.x - prev.x) * (r / dPrev);
+			const startY = curr.y - (curr.y - prev.y) * (r / dPrev);
+			
+			const endX = curr.x + (next.x - curr.x) * (r / dNext);
+			const endY = curr.y + (next.y - curr.y) * (r / dNext);
+			
+			path += ` L ${startX} ${startY} Q ${curr.x} ${curr.y} ${endX} ${endY}`;
+		}
+		path += ` L ${points[points.length - 1].x} ${points[points.length - 1].y}`;
+		return path;
+	};
+
 	const findOrthogonalRoute = (
 		start: GraphNodePosition,
 		end: GraphNodePosition
@@ -566,10 +681,12 @@
 		if (!middle) {
 			return null;
 		}
-		const points = simplifyRoute([start, routeStart, gridStart, ...middle, gridEnd, routeEnd, end]);
-		return points
-			.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`)
-			.join(' ');
+		
+		let points = simplifyRoute([routeStart, gridStart, ...middle, gridEnd, routeEnd]);
+		points = smoothRoute(points);
+		points = simplifyRoute([start, ...points, end]);
+		
+		return roundedPath(points, remPx * 1.5);
 	};
 
 	const edgePath = (edge: GraphEdge): string | null => {
@@ -596,7 +713,14 @@
 			return null;
 		}
 		const start = socketPoint(connectionDraft.from, 'output');
-		return start ? wirePath(start, { x: connectionDraft.endX, y: connectionDraft.endY }) : null;
+		if (!start) return null;
+		
+		if (connectionDraft.snapNodeId && connectionDraft.snapSocketId) {
+			const end = socketPoint({ nodeId: connectionDraft.snapNodeId, socketId: connectionDraft.snapSocketId }, 'input');
+			if (end) return wirePath(start, end);
+		}
+		
+		return wirePath(start, { x: connectionDraft.endX, y: connectionDraft.endY });
 	};
 
 	const clientToWorldPx = (clientX: number, clientY: number): { x: number; y: number } => {
@@ -955,6 +1079,14 @@
 	};
 
 	const finishConnectionAtPointer = (event: PointerEvent): void => {
+		if (connectionDraft?.snapNodeId && connectionDraft?.snapSocketId) {
+			const socket = nodesById.get(connectionDraft.snapNodeId)?.inputs.find((candidate) => candidate.id === connectionDraft!.snapSocketId);
+			if (socket) {
+				completeConnection(connectionDraft.snapNodeId, socket);
+				return;
+			}
+		}
+
 		const target = document.elementFromPoint(event.clientX, event.clientY);
 		const inputSocket =
 			target instanceof Element
@@ -1025,7 +1157,49 @@
 		}
 		if (connectionDraft?.pointerId === event.pointerId) {
 			const world = clientToWorldPx(event.clientX, event.clientY);
-			connectionDraft = { ...connectionDraft, endX: world.x, endY: world.y };
+			
+			let bestSnapDist = remPx * 4; // max snap distance
+			let bestNodeId: string | undefined = undefined;
+			let bestSocketId: string | undefined = undefined;
+			
+			for (const node of effectiveNodes) {
+				if (node.id === connectionDraft.from.nodeId) continue;
+				
+				for (const socket of node.inputs) {
+					if (socket.compatible === false) continue;
+					const pt = socketPoint({ nodeId: node.id, socketId: socket.id }, 'input');
+					if (!pt) continue;
+					
+					const dist = Math.hypot(world.x - pt.x, world.y - pt.y);
+					if (dist < bestSnapDist) {
+						bestSnapDist = dist;
+						bestNodeId = node.id;
+						bestSocketId = socket.id;
+					}
+				}
+				
+				// Snap to node header if close to the node bounds and it has exactly one compatible input
+				if (node.inputs.length === 1 && node.inputs[0].compatible !== false) {
+					const left = node.x * remPx;
+					const top = node.y * remPx;
+					const right = left + nodeWidth(node) * remPx;
+					const bottom = top + nodeHeight(node) * remPx;
+					
+					// If inside node bounds or slightly expanded bounds
+					const margin = remPx * 1;
+					if (world.x >= left - margin && world.x <= right + margin && world.y >= top - margin && world.y <= bottom + margin) {
+						// Only snap to the whole node if it's better than our current best distance
+						// Being inside the node bounds is considered distance 0
+						if (bestSnapDist > 0) {
+							bestSnapDist = 0; // Prioritize this since we are directly over the node
+							bestNodeId = node.id;
+							bestSocketId = node.inputs[0].id;
+						}
+					}
+				}
+			}
+			
+			connectionDraft = { ...connectionDraft, endX: world.x, endY: world.y, snapNodeId: bestNodeId, snapSocketId: bestSocketId };
 		}
 	};
 
@@ -1190,6 +1364,7 @@
 	class:selecting={selectionGesture !== null}
 	class:connecting={connectionDraft !== null}
 	class="graph-canvas"
+	data-socket-labels={socketLabels}
 	role="application"
 	aria-label="Node graph"
 	tabindex="0"
@@ -1268,6 +1443,7 @@
 				class:selected={selectedIds.has(node.id)}
 				class:active={node.active}
 				class:invalid={node.invalid}
+				class:draft-target={connectionDraft?.snapNodeId === node.id}
 				class="node"
 				style:left={`${node.x}rem`}
 				style:top={`${node.y}rem`}
@@ -1281,6 +1457,8 @@
 								<button
 									type="button"
 									class:incompatible={socket.compatible === false}
+									class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
+									class:draft-target={connectionDraft?.snapNodeId === node.id && connectionDraft?.snapSocketId === socket.id}
 									class="socket header-socket input"
 									data-node-id={node.id}
 									data-socket-id={socket.id}
@@ -1306,6 +1484,7 @@
 								<button
 									type="button"
 									class:incompatible={socket.compatible === false}
+									class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
 									class="socket header-socket output"
 									title={socket.valueType ?? socket.label}
 									onpointerdown={(event) => startConnection(event, node.id, socket)}>
@@ -1325,6 +1504,8 @@
 									<button
 										type="button"
 										class:incompatible={socket.compatible === false}
+										class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
+										class:draft-target={connectionDraft?.snapNodeId === node.id && connectionDraft?.snapSocketId === socket.id}
 										class="socket input"
 										data-node-id={node.id}
 										data-socket-id={socket.id}
@@ -1341,6 +1522,7 @@
 									<button
 										type="button"
 										class:incompatible={socket.compatible === false}
+										class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
 										class="socket output"
 										title={socket.valueType ?? socket.label}
 										onpointerdown={(event) => startConnection(event, node.id, socket)}>
@@ -1390,7 +1572,7 @@
 		--ga-node: color-mix(in srgb, var(--gc-color-background, #11151b) 80%, #293449);
 		--ga-outline: var(--gc-color-panel-outline, #536077);
 		--ga-selection: var(--gc-color-selection, #66a6ff);
-		--ga-active: #63d69a;
+		--ga-active: #f2c01a;
 		--ga-error: #ff6d75;
 		--ga-socket: #b4c2d8;
 		position: relative;
@@ -1442,6 +1624,7 @@
 		block-size: 0.1rem;
 		overflow: visible;
 		pointer-events: none;
+		/* z-index: 2; */
 	}
 
 	.wires path {
@@ -1504,21 +1687,35 @@
 		box-shadow: 0 0.55rem 1.3rem rgb(0 0 0 / 0.28);
 		color: var(--gc-color-text, #e8edf6);
 		overflow: visible;
+		transition:
+			border-color 0.1s ease,
+			box-shadow 0.1s ease;
 	}
 
 	.node.selected {
 		border-color: var(--ga-selection);
-		box-shadow:
-			0 0 0 0.08rem color-mix(in srgb, var(--ga-selection) 45%, transparent),
-			0 0.6rem 1.4rem rgb(0 0 0 / 0.32);
 	}
 
 	.node.active {
 		border-color: var(--ga-active);
 	}
 
+	.node.selected.active {
+		box-shadow: 0 0 0.5rem color-mix(in srgb, var(--gc-color-selection) 70%, transparent);
+	}
+
 	.node.invalid {
 		border-color: var(--ga-error);
+	}
+
+	.node.draft-target {
+		border-color: var(--ga-selection);
+		box-shadow: 0 0 0.8rem color-mix(in srgb, var(--gc-color-selection) 60%, transparent);
+	}
+
+	.socket.draft-target .pin {
+		background: var(--ga-selection);
+		box-shadow: 0 0 0.4rem var(--ga-selection);
 	}
 
 	.node-header {
@@ -1586,22 +1783,6 @@
 		font-size: 0.64rem;
 	}
 
-	.header-socket.input {
-		padding-inline: 0.96rem 0.12rem;
-	}
-
-	.header-socket.output {
-		padding-inline: 0.12rem 0.96rem;
-	}
-
-	.header-socket.input .pin {
-		inset-inline-start: 0.08rem;
-	}
-
-	.header-socket.output .pin {
-		inset-inline-end: 0.08rem;
-	}
-
 	.node-body {
 		display: flex;
 		flex-direction: column;
@@ -1634,7 +1815,7 @@
 		gap: 0.42rem;
 		block-size: 1.45rem;
 		min-inline-size: 0;
-		padding: 0 0.52rem;
+		/* padding: 0 0.52rem; */
 		border: 0;
 		background: transparent;
 		color: inherit;
@@ -1643,20 +1824,23 @@
 		cursor: crosshair;
 	}
 
-	.socket.output {
-		justify-content: flex-end;
-		padding-inline: 0.52rem 0.72rem;
-		text-align: end;
-	}
-
-	.socket.input {
-		padding-inline: 0.72rem 0.52rem;
-	}
-
 	.socket span:not(.pin) {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		transition: opacity 0.15s ease;
+	}
+
+	.graph-canvas[data-socket-labels="never"] .socket span:not(.pin) {
+		opacity: 0;
+	}
+
+	.graph-canvas[data-socket-labels="hover"] .socket span:not(.pin) {
+		opacity: 0;
+	}
+
+	.graph-canvas[data-socket-labels="hover"] .socket:hover span:not(.pin) {
+		opacity: 1;
 	}
 
 	.socket.incompatible {
@@ -1665,36 +1849,25 @@
 	}
 
 	.pin {
-		position: absolute;
-		inset-block-start: 50%;
-		display: block;
 		box-sizing: border-box;
-		inline-size: 0.78rem;
-		block-size: 0.78rem;
-		border: solid 0.11rem var(--socket-color);
+		inline-size: 0.5rem;
+		block-size: 0.5rem;
+		border: solid 0.05rem color-mix(in srgb, var(--socket-color) 70%, transparent);
 		border-radius: 50%;
 		background: var(--ga-node);
 		box-shadow: 0 0 0 0.08rem rgb(0 0 0 / 0.32);
-		transform: translateY(-50%);
 	}
 
-	.input .pin {
-		inset-inline-start: -0.39rem;
-	}
-
-	.output .pin {
-		inset-inline-end: -0.39rem;
-	}
-
-	.socket:hover .pin {
+	.socket:hover .pin,
+	.socket.connected .pin {
 		background: var(--socket-color);
 	}
 
 	.node-content {
 		flex: 1 1 auto;
 		min-block-size: 0;
-		padding: 0.18rem 0.35rem 0.35rem;
-		overflow: auto;
+		/* padding: 0.18rem 0.35rem 0.35rem; */
+		/* overflow: auto; */
 		user-select: text;
 	}
 
