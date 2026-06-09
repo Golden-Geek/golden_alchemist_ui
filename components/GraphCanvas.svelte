@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, type Snippet } from 'svelte';
 	import type {
 		GraphCamera,
 		GraphConnectionRequest,
@@ -64,6 +64,8 @@
 		onNodesMove,
 		onNodeResize,
 		onConnect,
+		nodeContent,
+		onBackgroundContextMenu,
 		initialCamera,
 		onCameraChange,
 		emptyLabel = 'No nodes in this graph.'
@@ -76,6 +78,8 @@
 		onNodesMove?: (moves: GraphNodeMove[]) => void | Promise<void>;
 		onNodeResize?: (resize: GraphNodeResize) => void | Promise<void>;
 		onConnect?: (connection: GraphConnectionRequest) => void;
+		nodeContent?: Snippet<[GraphNode]>;
+		onBackgroundContextMenu?: (event: MouseEvent, position: GraphNodePosition) => void;
 		initialCamera?: GraphCamera;
 		onCameraChange?: (camera: GraphCamera) => void;
 		emptyLabel?: string;
@@ -86,9 +90,9 @@
 	const CHECKER_CELL_REM = 2;
 	const DEFAULT_NODE_WIDTH_REM = 13;
 	const MIN_NODE_WIDTH_REM = 8;
-	const NODE_HEADER_REM = 2.55;
+	const NODE_HEADER_REM = 1.8;
 	const SOCKET_ROW_REM = 1.45;
-	const SOCKET_START_REM = 3.25;
+	const SOCKET_START_REM = 2.05;
 	const FRAME_PADDING_REM = 3;
 	const CAMERA_ANIMATION_MS = 240;
 
@@ -399,6 +403,19 @@
 	export const focus = (): void => {
 		container?.focus();
 	};
+
+	export const clientToWorld = (clientX: number, clientY: number): GraphNodePosition => {
+		const world = clientToWorldPx(clientX, clientY);
+		return {
+			x: world.x / remPx,
+			y: world.y / remPx
+		};
+	};
+
+	export const viewportCenter = (): GraphNodePosition => ({
+		x: (viewportWidth * 0.5 - camera.x) / camera.zoom / remPx,
+		y: (viewportHeight * 0.5 - camera.y) / camera.zoom / remPx
+	});
 
 	const updateSelection = (nodeId: string, additive: boolean): void => {
 		const next = additive ? new Set(selectedIds) : new Set<string>();
@@ -748,6 +765,19 @@
 		applyCamera(cameraAtZoom(camera.zoom * Math.exp(-event.deltaY * 0.0014), pointerX, pointerY));
 	};
 
+	const handleContextMenu = (event: MouseEvent): void => {
+		const target = event.target;
+		if (
+			!onBackgroundContextMenu ||
+			(target instanceof Element && target.closest('.node, .toolbar'))
+		) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		onBackgroundContextMenu?.(event, clientToWorld(event.clientX, event.clientY));
+	};
+
 	const handleKeydown = (event: KeyboardEvent): void => {
 		if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) {
 			return;
@@ -804,7 +834,8 @@
 	onpointerup={handlePointerEnd}
 	onpointercancel={handlePointerEnd}
 	onkeydown={handleKeydown}
-	onwheel={handleWheel}>
+	onwheel={handleWheel}
+	oncontextmenu={handleContextMenu}>
 	<div
 		class="toolbar"
 		role="group"
@@ -870,33 +901,42 @@
 					<strong>{node.label}</strong>
 					{#if node.subtitle}<small>{node.subtitle}</small>{/if}
 				</button>
-				<div class="socket-columns">
-					<div class="socket-list inputs">
-						{#each node.inputs as socket (socket.id)}
-							<button
-								type="button"
-								class:incompatible={socket.compatible === false}
-								class="socket input"
-								title={socket.valueType ?? socket.label}
-								onpointerup={(event) => finishConnection(event, node.id, socket)}>
-								<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}></span>
-								<span>{socket.label}</span>
-							</button>
-						{/each}
+				<div class="node-body">
+					<div class="socket-columns">
+						<div class="socket-list inputs">
+							{#each node.inputs as socket (socket.id)}
+								<button
+									type="button"
+									class:incompatible={socket.compatible === false}
+									class="socket input"
+									title={socket.valueType ?? socket.label}
+									onpointerup={(event) => finishConnection(event, node.id, socket)}>
+									<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}
+									></span>
+									<span>{socket.label}</span>
+								</button>
+							{/each}
+						</div>
+						<div class="socket-list outputs">
+							{#each node.outputs as socket (socket.id)}
+								<button
+									type="button"
+									class:incompatible={socket.compatible === false}
+									class="socket output"
+									title={socket.valueType ?? socket.label}
+									onpointerdown={(event) => startConnection(event, node.id, socket)}>
+									<span>{socket.label}</span>
+									<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}
+									></span>
+								</button>
+							{/each}
+						</div>
 					</div>
-					<div class="socket-list outputs">
-						{#each node.outputs as socket (socket.id)}
-							<button
-								type="button"
-								class:incompatible={socket.compatible === false}
-								class="socket output"
-								title={socket.valueType ?? socket.label}
-								onpointerdown={(event) => startConnection(event, node.id, socket)}>
-								<span>{socket.label}</span>
-								<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}></span>
-							</button>
-						{/each}
-					</div>
+					{#if nodeContent}
+						<div class="node-content" data-no-node-select>
+							{@render nodeContent(node)}
+						</div>
+					{/if}
 				</div>
 				{#if node.resizable}
 					<button
@@ -952,10 +992,6 @@
 		background-size: var(--checker-size) var(--checker-size);
 		user-select: none;
 		cursor: default;
-	}
-
-	.graph-canvas:focus-visible {
-		box-shadow: inset 0 0 0 0.08rem color-mix(in srgb, var(--ga-selection) 70%, transparent);
 	}
 
 	.graph-canvas.panning,
@@ -1049,17 +1085,13 @@
 		flex-direction: column;
 		inline-size: 100%;
 		justify-content: center;
-		min-block-size: 2.55rem;
-		padding: 0.45rem 0.72rem;
+		min-block-size: 1.8rem;
+		padding: 0.25rem 0.62rem;
 		box-sizing: border-box;
 		border: 0;
 		border-block-end: solid 0.06rem color-mix(in srgb, var(--ga-outline) 55%, transparent);
 		border-radius: 0.48rem 0.48rem 0 0;
-		background: linear-gradient(
-			180deg,
-			color-mix(in srgb, var(--ga-selection) 18%, transparent),
-			transparent
-		);
+		background: color-mix(in srgb, var(--ga-outline) 12%, var(--ga-node));
 		color: inherit;
 		font: inherit;
 		text-align: start;
@@ -1070,6 +1102,10 @@
 		cursor: grabbing;
 	}
 
+	.node.active .node-header {
+		background: color-mix(in srgb, var(--ga-active) 22%, var(--ga-node));
+	}
+
 	.node strong,
 	.node small {
 		overflow: hidden;
@@ -1078,7 +1114,7 @@
 	}
 
 	.node strong {
-		font-size: 0.82rem;
+		font-size: 0.76rem;
 	}
 
 	.node small {
@@ -1086,15 +1122,23 @@
 		opacity: 0.62;
 	}
 
+	.node-body {
+		display: flex;
+		flex-direction: column;
+		box-sizing: border-box;
+		block-size: calc(100% - 1.8rem);
+		min-block-size: 2.2rem;
+		overflow: hidden;
+	}
+
 	.socket-columns {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 		align-content: start;
 		box-sizing: border-box;
-		block-size: calc(100% - 2.55rem);
-		min-block-size: 2.2rem;
-		padding-block: 0.7rem;
-		overflow: auto;
+		flex: 0 0 auto;
+		min-block-size: 1.45rem;
+		padding-block: 0.25rem;
 	}
 
 	.socket-list {
@@ -1155,6 +1199,14 @@
 
 	.socket:hover .pin {
 		background: var(--socket-color);
+	}
+
+	.node-content {
+		flex: 1 1 auto;
+		min-block-size: 0;
+		padding: 0.18rem 0.35rem 0.35rem;
+		overflow: auto;
+		user-select: text;
 	}
 
 	.resize-handle {
