@@ -116,9 +116,10 @@
 	const CHECKER_CELL_REM = 2;
 	const DEFAULT_NODE_WIDTH_REM = 13;
 	const MIN_NODE_WIDTH_REM = 8;
+	const NODE_BORDER_REM = 0.08;
 	const NODE_HEADER_REM = 1.8;
 	const SOCKET_ROW_REM = 1.45;
-	const SOCKET_START_REM = 2.05;
+	const SOCKET_START_REM = NODE_HEADER_REM + 0.25 + NODE_BORDER_REM;
 	const HEADER_SOCKET_INSET_REM = 0.47;
 	const FRAME_PADDING_REM = 3;
 	const CAMERA_ANIMATION_MS = 240;
@@ -245,10 +246,11 @@
 
 	const minimumNodeHeight = (node: GraphNode): number =>
 		node.socketPlacement === 'header'
-			? NODE_HEADER_REM + 1.2
+			? NODE_HEADER_REM + NODE_BORDER_REM * 2 + 1.2
 			: Math.max(
-					NODE_HEADER_REM + 1.2,
+					NODE_HEADER_REM + NODE_BORDER_REM * 2 + 1.2,
 					NODE_HEADER_REM +
+						NODE_BORDER_REM * 2 +
 						1.4 +
 						Math.max(node.inputs.length, node.outputs.length, 1) * SOCKET_ROW_REM
 				);
@@ -358,7 +360,7 @@
 							? nodeWidth(node) - HEADER_SOCKET_INSET_REM
 							: HEADER_SOCKET_INSET_REM)) *
 					remPx,
-				y: (node.y + NODE_HEADER_REM * 0.5) * remPx
+				y: (node.y + NODE_BORDER_REM + NODE_HEADER_REM * 0.5) * remPx
 			};
 		}
 		return {
@@ -1723,12 +1725,13 @@
 		display: flex;
 		align-items: stretch;
 		inline-size: 100%;
-		min-block-size: 1.8rem;
+		block-size: 1.8rem;
 		box-sizing: border-box;
 		border-block-end: solid 0.06rem color-mix(in srgb, var(--ga-outline) 55%, transparent);
 		border-radius: 0.48rem 0.48rem 0 0;
 		background: color-mix(in srgb, var(--ga-outline) 12%, var(--ga-node));
 		color: inherit;
+		overflow: hidden;
 	}
 
 	.node-title {
@@ -1737,7 +1740,7 @@
 		flex-direction: column;
 		justify-content: center;
 		min-inline-size: 0;
-		padding: 0.25rem 0.35rem;
+		padding: 0.15rem 0.35rem;
 		border: 0;
 		background: transparent;
 		color: inherit;
@@ -1780,6 +1783,7 @@
 	.header-socket {
 		block-size: 100%;
 		min-block-size: 1.72rem;
+		padding-inline: 0.4rem;
 		font-size: 0.64rem;
 	}
 
@@ -1789,7 +1793,6 @@
 		box-sizing: border-box;
 		block-size: calc(100% - 1.8rem);
 		min-block-size: 2.2rem;
-		overflow: hidden;
 	}
 
 	.socket-columns {
@@ -1812,10 +1815,10 @@
 		position: relative;
 		display: flex;
 		align-items: center;
-		gap: 0.42rem;
+		gap: 0.25rem;
 		block-size: 1.45rem;
 		min-inline-size: 0;
-		/* padding: 0 0.52rem; */
+		padding: 0 0.4rem;
 		border: 0;
 		background: transparent;
 		color: inherit;
@@ -1823,6 +1826,15 @@
 		font-size: 0.68rem;
 		cursor: crosshair;
 	}
+
+	.socket-columns .socket.input {
+		justify-content: flex-start;
+	}
+
+	.socket-columns .socket.output {
+		justify-content: flex-end;
+	}
+
 
 	.socket span:not(.pin) {
 		overflow: hidden;
@@ -1849,6 +1861,8 @@
 	}
 
 	.pin {
+		position: relative;
+		z-index: 0;
 		box-sizing: border-box;
 		inline-size: 0.5rem;
 		block-size: 0.5rem;
@@ -1861,6 +1875,26 @@
 	.socket:hover .pin,
 	.socket.connected .pin {
 		background: var(--socket-color);
+	}
+
+	.socket.connected .pin::after {
+		content: '';
+		position: absolute;
+		top: 50%;
+		transform: translateY(-50%);
+		width: 0.75rem;
+		height: 0.16rem;
+		background: color-mix(in srgb, var(--socket-color) 72%, transparent);
+		z-index: -1;
+		pointer-events: none;
+	}
+
+	.socket.input.connected .pin::after {
+		right: 50%;
+	}
+
+	.socket.output.connected .pin::after {
+		left: 50%;
 	}
 
 	.node-content {
