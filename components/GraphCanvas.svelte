@@ -593,16 +593,39 @@
 		container?.setPointerCapture(event.pointerId);
 	};
 
-	const finishConnection = (event: PointerEvent, nodeId: string, socket: GraphSocket): void => {
+	const completeConnection = (nodeId: string, socket: GraphSocket): boolean => {
 		if (!connectionDraft || socket.compatible === false) {
-			return;
+			return false;
 		}
-		event.stopPropagation();
 		onConnect?.({
 			from: connectionDraft.from,
 			to: { nodeId, socketId: socket.id }
 		});
 		connectionDraft = null;
+		return true;
+	};
+
+	const finishConnection = (event: PointerEvent, nodeId: string, socket: GraphSocket): void => {
+		if (completeConnection(nodeId, socket)) {
+			event.stopPropagation();
+		}
+	};
+
+	const finishConnectionAtPointer = (event: PointerEvent): void => {
+		const target = document.elementFromPoint(event.clientX, event.clientY);
+		const inputSocket =
+			target instanceof Element
+				? target.closest<HTMLButtonElement>('.socket.input[data-node-id][data-socket-id]')
+				: null;
+		const nodeId = inputSocket?.dataset.nodeId;
+		const socketId = inputSocket?.dataset.socketId;
+		if (!nodeId || !socketId) {
+			return;
+		}
+		const socket = nodesById.get(nodeId)?.inputs.find((candidate) => candidate.id === socketId);
+		if (socket) {
+			completeConnection(nodeId, socket);
+		}
 	};
 
 	const handlePointerMove = (event: PointerEvent): void => {
@@ -746,6 +769,7 @@
 			nodeResizeGesture = null;
 		}
 		if (connectionDraft?.pointerId === event.pointerId) {
+			finishConnectionAtPointer(event);
 			connectionDraft = null;
 		}
 		if (container?.hasPointerCapture(event.pointerId)) {
@@ -909,6 +933,8 @@
 									type="button"
 									class:incompatible={socket.compatible === false}
 									class="socket input"
+									data-node-id={node.id}
+									data-socket-id={socket.id}
 									title={socket.valueType ?? socket.label}
 									onpointerup={(event) => finishConnection(event, node.id, socket)}>
 									<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}
@@ -1148,6 +1174,7 @@
 	}
 
 	.socket {
+		position: relative;
 		display: flex;
 		align-items: center;
 		gap: 0.42rem;
@@ -1164,7 +1191,12 @@
 
 	.socket.output {
 		justify-content: flex-end;
+		padding-inline: 0.52rem 0.72rem;
 		text-align: end;
+	}
+
+	.socket.input {
+		padding-inline: 0.72rem 0.52rem;
 	}
 
 	.socket span:not(.pin) {
@@ -1179,22 +1211,25 @@
 	}
 
 	.pin {
+		position: absolute;
+		inset-block-start: 50%;
 		display: block;
-		flex: 0 0 auto;
-		inline-size: 0.68rem;
-		block-size: 0.68rem;
+		box-sizing: border-box;
+		inline-size: 0.78rem;
+		block-size: 0.78rem;
 		border: solid 0.11rem var(--socket-color);
 		border-radius: 50%;
 		background: var(--ga-node);
 		box-shadow: 0 0 0 0.08rem rgb(0 0 0 / 0.32);
+		transform: translateY(-50%);
 	}
 
 	.input .pin {
-		margin-inline-start: -0.94rem;
+		inset-inline-start: -0.39rem;
 	}
 
 	.output .pin {
-		margin-inline-end: -0.94rem;
+		inset-inline-end: -0.39rem;
 	}
 
 	.socket:hover .pin {
