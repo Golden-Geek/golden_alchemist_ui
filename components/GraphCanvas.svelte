@@ -975,6 +975,8 @@
 		}
 		if (event.ctrlKey || event.metaKey || event.shiftKey) {
 			updateSelection(node.id, true);
+		} else if (event.altKey && target instanceof Element && target.closest('.node-header')) {
+			node.active = true;
 		} else if (!selectedIds.has(node.id)) {
 			updateSelection(node.id, false);
 		}
