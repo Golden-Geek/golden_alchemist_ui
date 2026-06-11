@@ -4,6 +4,7 @@ export type {
 	GraphConnectionRequest,
 	GraphEdge,
 	GraphNode,
+	GraphNodeCreationRequest,
 	GraphNodeMove,
 	GraphNodePosition,
 	GraphNodeResize,

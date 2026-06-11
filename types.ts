@@ -18,6 +18,7 @@ export interface GraphNode {
 	id: string;
 	label: string;
 	subtitle?: string;
+	color?: string;
 	socketPlacement?: 'body' | 'header';
 	x: number;
 	y: number;
@@ -67,4 +68,10 @@ export interface GraphNodeSize {
 export interface GraphNodeResize {
 	nodeId: string;
 	size: GraphNodeSize;
+}
+
+export interface GraphNodeCreationRequest {
+	position: GraphNodePosition;
+	clientX: number;
+	clientY: number;
 }

@@ -5,6 +5,7 @@
 		GraphConnectionRequest,
 		GraphEdge,
 		GraphNode,
+		GraphNodeCreationRequest,
 		GraphNodeMove,
 		GraphNodePosition,
 		GraphNodeResize,
@@ -78,14 +79,14 @@
 		edges,
 		selectedNodeIds = [],
 		selectedEdgeIds = [],
-		onSelectionChange,
-		onEdgeSelectionChange,
+		onGraphSelectionChange,
 		onNodeMove,
 		onNodesMove,
 		onNodeResize,
 		onConnect,
 		nodeContent,
 		onBackgroundContextMenu,
+		onCreateRequest,
 		routeEdgesAroundNodes = false,
 		socketLabels = 'hover',
 		initialCamera,
@@ -96,14 +97,14 @@
 		edges: GraphEdge[];
 		selectedNodeIds?: string[];
 		selectedEdgeIds?: string[];
-		onSelectionChange?: (nodeIds: string[]) => void;
-		onEdgeSelectionChange?: (edgeIds: string[]) => void;
+		onGraphSelectionChange?: (nodeIds: string[], edgeIds: string[]) => void;
 		onNodeMove?: (nodeId: string, position: GraphNodePosition) => void | Promise<void>;
 		onNodesMove?: (moves: GraphNodeMove[]) => void | Promise<void>;
 		onNodeResize?: (resize: GraphNodeResize) => void | Promise<void>;
 		onConnect?: (connection: GraphConnectionRequest) => void;
 		nodeContent?: Snippet<[GraphNode]>;
 		onBackgroundContextMenu?: (event: MouseEvent, position: GraphNodePosition) => void;
+		onCreateRequest?: (request: GraphNodeCreationRequest) => void;
 		routeEdgesAroundNodes?: boolean;
 		socketLabels?: 'always' | 'hover' | 'never';
 		initialCamera?: GraphCamera;
@@ -457,8 +458,14 @@
 		return simplified;
 	};
 
-	const pointInRect = (x: number, y: number, left: number, top: number, right: number, bottom: number) => 
-		x > left && x < right && y > top && y < bottom;
+	const pointInRect = (
+		x: number,
+		y: number,
+		left: number,
+		top: number,
+		right: number,
+		bottom: number
+	) => x > left && x < right && y > top && y < bottom;
 
 	const lineIntersectsAnyObstacle = (x0: number, y0: number, x1: number, y1: number): boolean => {
 		const minX = Math.min(x0, x1);
@@ -467,19 +474,40 @@
 		const maxY = Math.max(y0, y1);
 
 		for (const obstacle of routingObstacles) {
-			if (maxX <= obstacle.left || minX >= obstacle.right || maxY <= obstacle.top || minY >= obstacle.bottom) {
+			if (
+				maxX <= obstacle.left ||
+				minX >= obstacle.right ||
+				maxY <= obstacle.top ||
+				minY >= obstacle.bottom
+			) {
 				continue;
 			}
-			if (pointInRect(x0, y0, obstacle.left, obstacle.top, obstacle.right, obstacle.bottom) ||
-				pointInRect(x1, y1, obstacle.left, obstacle.top, obstacle.right, obstacle.bottom)) {
+			if (
+				pointInRect(x0, y0, obstacle.left, obstacle.top, obstacle.right, obstacle.bottom) ||
+				pointInRect(x1, y1, obstacle.left, obstacle.top, obstacle.right, obstacle.bottom)
+			) {
 				return true;
 			}
-			
+
 			const dx = x1 - x0;
 			const dy = y1 - y0;
 			if (dx === 0 || dy === 0) {
-				if (dy === 0 && y0 > obstacle.top && y0 < obstacle.bottom && minX < obstacle.right && maxX > obstacle.left) return true;
-				if (dx === 0 && x0 > obstacle.left && x0 < obstacle.right && minY < obstacle.bottom && maxY > obstacle.top) return true;
+				if (
+					dy === 0 &&
+					y0 > obstacle.top &&
+					y0 < obstacle.bottom &&
+					minX < obstacle.right &&
+					maxX > obstacle.left
+				)
+					return true;
+				if (
+					dx === 0 &&
+					x0 > obstacle.left &&
+					x0 < obstacle.right &&
+					minY < obstacle.bottom &&
+					maxY > obstacle.top
+				)
+					return true;
 				continue;
 			}
 
@@ -491,10 +519,12 @@
 				return t > 0 && t < 1 && u > 0 && u < 1;
 			};
 
-			if (checkLine(obstacle.left, obstacle.top, obstacle.right, obstacle.top) ||
+			if (
+				checkLine(obstacle.left, obstacle.top, obstacle.right, obstacle.top) ||
 				checkLine(obstacle.right, obstacle.top, obstacle.right, obstacle.bottom) ||
 				checkLine(obstacle.right, obstacle.bottom, obstacle.left, obstacle.bottom) ||
-				checkLine(obstacle.left, obstacle.bottom, obstacle.left, obstacle.top)) {
+				checkLine(obstacle.left, obstacle.bottom, obstacle.left, obstacle.top)
+			) {
 				return true;
 			}
 		}
@@ -503,23 +533,30 @@
 
 	const smoothRoute = (points: GraphNodePosition[]): GraphNodePosition[] => {
 		if (points.length <= 2) return points;
-		
+
 		const smoothed: GraphNodePosition[] = [points[0]];
 		let currentIndex = 0;
-		
+
 		while (currentIndex < points.length - 1) {
 			let furthestVisibleIndex = currentIndex + 1;
-			
+
 			for (let i = currentIndex + 2; i < points.length; i++) {
-				if (!lineIntersectsAnyObstacle(points[currentIndex].x, points[currentIndex].y, points[i].x, points[i].y)) {
+				if (
+					!lineIntersectsAnyObstacle(
+						points[currentIndex].x,
+						points[currentIndex].y,
+						points[i].x,
+						points[i].y
+					)
+				) {
 					furthestVisibleIndex = i;
 				}
 			}
-			
+
 			smoothed.push(points[furthestVisibleIndex]);
 			currentIndex = furthestVisibleIndex;
 		}
-		
+
 		return smoothed;
 	};
 
@@ -535,25 +572,25 @@
 
 			const dPrev = Math.hypot(curr.x - prev.x, curr.y - prev.y);
 			const dNext = Math.hypot(next.x - curr.x, next.y - curr.y);
-			
+
 			if (dPrev < 0.1 || dNext < 0.1) {
 				path += ` L ${curr.x} ${curr.y}`;
 				continue;
 			}
-			
+
 			const r = Math.min(radius, dPrev / 2, dNext / 2);
-			
+
 			if (r <= 0.1) {
 				path += ` L ${curr.x} ${curr.y}`;
 				continue;
 			}
-			
+
 			const startX = curr.x - (curr.x - prev.x) * (r / dPrev);
 			const startY = curr.y - (curr.y - prev.y) * (r / dPrev);
-			
+
 			const endX = curr.x + (next.x - curr.x) * (r / dNext);
 			const endY = curr.y + (next.y - curr.y) * (r / dNext);
-			
+
 			path += ` L ${startX} ${startY} Q ${curr.x} ${curr.y} ${endX} ${endY}`;
 		}
 		path += ` L ${points[points.length - 1].x} ${points[points.length - 1].y}`;
@@ -683,11 +720,11 @@
 		if (!middle) {
 			return null;
 		}
-		
+
 		let points = simplifyRoute([routeStart, gridStart, ...middle, gridEnd, routeEnd]);
 		points = smoothRoute(points);
 		points = simplifyRoute([start, ...points, end]);
-		
+
 		return roundedPath(points, remPx * 1.5);
 	};
 
@@ -716,12 +753,15 @@
 		}
 		const start = socketPoint(connectionDraft.from, 'output');
 		if (!start) return null;
-		
+
 		if (connectionDraft.snapNodeId && connectionDraft.snapSocketId) {
-			const end = socketPoint({ nodeId: connectionDraft.snapNodeId, socketId: connectionDraft.snapSocketId }, 'input');
+			const end = socketPoint(
+				{ nodeId: connectionDraft.snapNodeId, socketId: connectionDraft.snapSocketId },
+				'input'
+			);
 			if (end) return wirePath(start, end);
 		}
-		
+
 		return wirePath(start, { x: connectionDraft.endX, y: connectionDraft.endY });
 	};
 
@@ -854,6 +894,10 @@
 		y: (viewportHeight * 0.5 - camera.y) / camera.zoom / remPx
 	});
 
+	const publishSelection = (nodeIds: string[], edgeIds: string[]): void => {
+		onGraphSelectionChange?.(nodeIds, edgeIds);
+	};
+
 	const updateSelection = (nodeId: string, additive: boolean): void => {
 		const next = additive ? new Set(selectedIds) : new Set<string>();
 		if (additive && next.has(nodeId)) {
@@ -861,7 +905,7 @@
 		} else {
 			next.add(nodeId);
 		}
-		onSelectionChange?.([...next]);
+		publishSelection([...next], additive ? [...selectedEdgeIdSet] : []);
 	};
 
 	const updateEdgeSelection = (edge: GraphEdge, additive: boolean): void => {
@@ -874,7 +918,7 @@
 		} else {
 			next.add(edge.id);
 		}
-		onEdgeSelectionChange?.([...next]);
+		publishSelection(additive ? [...selectedIds] : [], [...next]);
 	};
 
 	const selectEdge = (event: PointerEvent, edge: GraphEdge): void => {
@@ -926,7 +970,7 @@
 				next.add(node.id);
 			}
 		}
-		onSelectionChange?.([...next]);
+		publishSelection([...next], [...selectedEdgeIdSet]);
 		selectionGesture = null;
 	};
 
@@ -997,7 +1041,7 @@
 			} else {
 				next.add(node.id);
 			}
-			onSelectionChange?.([...next]);
+			publishSelection([...next], additive ? [...selectedEdgeIdSet] : []);
 			if (!next.has(node.id)) {
 				return;
 			}
@@ -1084,7 +1128,9 @@
 
 	const finishConnectionAtPointer = (event: PointerEvent): void => {
 		if (connectionDraft?.snapNodeId && connectionDraft?.snapSocketId) {
-			const socket = nodesById.get(connectionDraft.snapNodeId)?.inputs.find((candidate) => candidate.id === connectionDraft!.snapSocketId);
+			const socket = nodesById
+				.get(connectionDraft.snapNodeId)
+				?.inputs.find((candidate) => candidate.id === connectionDraft!.snapSocketId);
 			if (socket) {
 				completeConnection(connectionDraft.snapNodeId, socket);
 				return;
@@ -1161,19 +1207,19 @@
 		}
 		if (connectionDraft?.pointerId === event.pointerId) {
 			const world = clientToWorldPx(event.clientX, event.clientY);
-			
+
 			let bestSnapDist = remPx * 4; // max snap distance
 			let bestNodeId: string | undefined = undefined;
 			let bestSocketId: string | undefined = undefined;
-			
+
 			for (const node of effectiveNodes) {
 				if (node.id === connectionDraft.from.nodeId) continue;
-				
+
 				for (const socket of node.inputs) {
 					if (socket.compatible === false) continue;
 					const pt = socketPoint({ nodeId: node.id, socketId: socket.id }, 'input');
 					if (!pt) continue;
-					
+
 					const dist = Math.hypot(world.x - pt.x, world.y - pt.y);
 					if (dist < bestSnapDist) {
 						bestSnapDist = dist;
@@ -1181,17 +1227,22 @@
 						bestSocketId = socket.id;
 					}
 				}
-				
+
 				// Snap to node header if close to the node bounds and it has exactly one compatible input
 				if (node.inputs.length === 1 && node.inputs[0].compatible !== false) {
 					const left = node.x * remPx;
 					const top = node.y * remPx;
 					const right = left + nodeWidth(node) * remPx;
 					const bottom = top + nodeHeight(node) * remPx;
-					
+
 					// If inside node bounds or slightly expanded bounds
 					const margin = remPx * 1;
-					if (world.x >= left - margin && world.x <= right + margin && world.y >= top - margin && world.y <= bottom + margin) {
+					if (
+						world.x >= left - margin &&
+						world.x <= right + margin &&
+						world.y >= top - margin &&
+						world.y <= bottom + margin
+					) {
 						// Only snap to the whole node if it's better than our current best distance
 						// Being inside the node bounds is considered distance 0
 						if (bestSnapDist > 0) {
@@ -1202,8 +1253,14 @@
 					}
 				}
 			}
-			
-			connectionDraft = { ...connectionDraft, endX: world.x, endY: world.y, snapNodeId: bestNodeId, snapSocketId: bestSocketId };
+
+			connectionDraft = {
+				...connectionDraft,
+				endX: world.x,
+				endY: world.y,
+				snapNodeId: bestNodeId,
+				snapSocketId: bestSocketId
+			};
 		}
 	};
 
@@ -1264,7 +1321,7 @@
 		}
 		if (panGesture?.pointerId === event.pointerId) {
 			if (!panGesture.moved && panGesture.clearSelectionOnClick) {
-				onSelectionChange?.([]);
+				publishSelection([], []);
 			}
 			panGesture = null;
 		}
@@ -1327,6 +1384,15 @@
 		if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) {
 			return;
 		}
+		const target = event.target;
+		if (
+			target instanceof HTMLInputElement ||
+			target instanceof HTMLSelectElement ||
+			target instanceof HTMLTextAreaElement ||
+			(target instanceof HTMLElement && target.isContentEditable)
+		) {
+			return;
+		}
 		if (event.key.toLowerCase() === 'f') {
 			event.preventDefault();
 			event.stopPropagation();
@@ -1335,6 +1401,15 @@
 			event.preventDefault();
 			event.stopPropagation();
 			home();
+		} else if (event.key === ' ' && onCreateRequest && container) {
+			event.preventDefault();
+			event.stopPropagation();
+			const bounds = container.getBoundingClientRect();
+			onCreateRequest({
+				position: viewportCenter(),
+				clientX: bounds.left + bounds.width * 0.5,
+				clientY: bounds.top + bounds.height * 0.5
+			});
 		}
 	};
 
@@ -1369,6 +1444,7 @@
 	class:connecting={connectionDraft !== null}
 	class="graph-canvas"
 	data-socket-labels={socketLabels}
+	data-local-context-menu={onBackgroundContextMenu ? '' : undefined}
 	role="application"
 	aria-label="Node graph"
 	tabindex="0"
@@ -1453,6 +1529,7 @@
 				style:top={`${node.y}rem`}
 				style:width={`${nodeWidth(node)}rem`}
 				style:height={`${nodeHeight(node)}rem`}
+				style:--node-accent={node.color ?? 'var(--ga-outline)'}
 				onpointerdown={(event) => selectNodeBody(event, node)}>
 				<div class="node-header">
 					{#if node.socketPlacement === 'header'}
@@ -1462,7 +1539,8 @@
 									type="button"
 									class:incompatible={socket.compatible === false}
 									class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
-									class:draft-target={connectionDraft?.snapNodeId === node.id && connectionDraft?.snapSocketId === socket.id}
+									class:draft-target={connectionDraft?.snapNodeId === node.id &&
+										connectionDraft?.snapSocketId === socket.id}
 									class="socket header-socket input"
 									data-node-id={node.id}
 									data-socket-id={socket.id}
@@ -1509,7 +1587,8 @@
 										type="button"
 										class:incompatible={socket.compatible === false}
 										class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
-										class:draft-target={connectionDraft?.snapNodeId === node.id && connectionDraft?.snapSocketId === socket.id}
+										class:draft-target={connectionDraft?.snapNodeId === node.id &&
+											connectionDraft?.snapSocketId === socket.id}
 										class="socket input"
 										data-node-id={node.id}
 										data-socket-id={socket.id}
@@ -1685,7 +1764,7 @@
 	.node {
 		position: absolute;
 		box-sizing: border-box;
-		border: solid 0.08rem color-mix(in srgb, var(--ga-outline) 78%, transparent);
+		border: solid 0.08rem color-mix(in srgb, var(--node-accent) 58%, transparent);
 		border-radius: 0.55rem;
 		background: var(--ga-node);
 		box-shadow: 0 0.55rem 1.3rem rgb(0 0 0 / 0.28);
@@ -1729,9 +1808,9 @@
 		inline-size: 100%;
 		block-size: 1.8rem;
 		box-sizing: border-box;
-		border-block-end: solid 0.06rem color-mix(in srgb, var(--ga-outline) 55%, transparent);
+		border-block-end: solid 0.06rem color-mix(in srgb, var(--node-accent) 62%, transparent);
 		border-radius: 0.48rem 0.48rem 0 0;
-		background: color-mix(in srgb, var(--ga-outline) 12%, var(--ga-node));
+		background: color-mix(in srgb, var(--node-accent) 28%, var(--ga-node));
 		color: inherit;
 		overflow: hidden;
 	}
@@ -1837,7 +1916,6 @@
 		justify-content: flex-end;
 	}
 
-
 	.socket span:not(.pin) {
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -1845,15 +1923,15 @@
 		transition: opacity 0.15s ease;
 	}
 
-	.graph-canvas[data-socket-labels="never"] .socket span:not(.pin) {
+	.graph-canvas[data-socket-labels='never'] .socket span:not(.pin) {
 		opacity: 0;
 	}
 
-	.graph-canvas[data-socket-labels="hover"] .socket span:not(.pin) {
+	.graph-canvas[data-socket-labels='hover'] .socket span:not(.pin) {
 		opacity: 0;
 	}
 
-	.graph-canvas[data-socket-labels="hover"] .socket:hover span:not(.pin) {
+	.graph-canvas[data-socket-labels='hover'] .socket:hover span:not(.pin) {
 		opacity: 1;
 	}
 
