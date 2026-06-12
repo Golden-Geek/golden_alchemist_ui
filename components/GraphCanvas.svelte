@@ -2339,9 +2339,9 @@
 		outline: none;
 	}
 
-	.node.active .node-header {
+	/* .node.active .node-header {
 		background: color-mix(in srgb, var(--ga-active) 22%, var(--ga-node));
-	}
+	} */
 
 	.node strong,
 	.node small {
