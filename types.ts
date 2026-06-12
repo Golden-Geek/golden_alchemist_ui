@@ -18,6 +18,9 @@ export interface GraphNode {
 	id: string;
 	label: string;
 	subtitle?: string;
+	description?: string;
+	canRename?: boolean;
+	collapsed?: boolean;
 	color?: string;
 	socketPlacement?: 'body' | 'header';
 	x: number;
@@ -27,6 +30,7 @@ export interface GraphNode {
 	resizable?: boolean;
 	inputs: GraphSocket[];
 	outputs: GraphSocket[];
+	headerInputs?: GraphSocket[];
 	active?: boolean;
 	invalid?: boolean;
 }

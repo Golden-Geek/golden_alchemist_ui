@@ -83,6 +83,8 @@
 		onNodeMove,
 		onNodesMove,
 		onNodeResize,
+		onNodeRename,
+		onNodeCollapsedChange,
 		onConnect,
 		nodeContent,
 		onBackgroundContextMenu,
@@ -101,6 +103,8 @@
 		onNodeMove?: (nodeId: string, position: GraphNodePosition) => void | Promise<void>;
 		onNodesMove?: (moves: GraphNodeMove[]) => void | Promise<void>;
 		onNodeResize?: (resize: GraphNodeResize) => void | Promise<void>;
+		onNodeRename?: (nodeId: string, label: string) => void | Promise<void>;
+		onNodeCollapsedChange?: (nodeId: string, collapsed: boolean) => void | Promise<void>;
 		onConnect?: (connection: GraphConnectionRequest) => void;
 		nodeContent?: Snippet<[GraphNode]>;
 		onBackgroundContextMenu?: (event: MouseEvent, position: GraphNodePosition) => void;
@@ -120,7 +124,6 @@
 	const NODE_BORDER_REM = 0.08;
 	const NODE_HEADER_REM = 1.8;
 	const SOCKET_ROW_REM = 1.45;
-	const SOCKET_START_REM = NODE_HEADER_REM + 0.25 + NODE_BORDER_REM;
 	const HEADER_SOCKET_INSET_REM = 0.47;
 	const FRAME_PADDING_REM = 3;
 	const CAMERA_ANIMATION_MS = 240;
@@ -130,6 +133,8 @@
 	const ROUTING_BUCKET_REM = 16;
 	const ROUTING_MAX_VISITS = 24_000;
 	const ROUTING_TURN_COST = 0.35;
+	const TITLE_DOUBLE_CLICK_MS = 300;
+	const TITLE_DOUBLE_CLICK_DISTANCE_PX = 6;
 
 	const finiteNumber = (value: number | undefined, fallback: number): number =>
 		typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -141,6 +146,11 @@
 	});
 
 	const cameraKey = (value: GraphCamera): string => `${value.x}:${value.y}:${value.zoom}`;
+
+	const snapScreenPx = (value: number): number => {
+		const scale = typeof window === 'undefined' ? 1 : Math.max(1, window.devicePixelRatio || 1);
+		return Math.round(value * scale) / scale;
+	};
 
 	let container: HTMLDivElement | null = $state(null);
 	let camera = $state<GraphCamera>({ x: 0, y: 0, zoom: 1 });
@@ -157,6 +167,13 @@
 	let optimisticPositions = $state<Record<string, GraphNodePosition>>({});
 	let resizeSizes = $state<Record<string, GraphNodeSize>>({});
 	let optimisticSizes = $state<Record<string, GraphNodeSize>>({});
+	let optimisticLabels = $state<Record<string, string>>({});
+	let optimisticCollapsed = $state<Record<string, boolean>>({});
+	let renamingNodeId: string | null = $state(null);
+	let renameDraft = $state('');
+	let renameInput: HTMLInputElement | null = $state(null);
+	let focusedRenameNodeId: string | null = null;
+	let lastTitlePointerDown: { nodeId: string; time: number; x: number; y: number } | null = null;
 	let animationFrame: number | null = null;
 	const routedPathCache = new Map<string, string>();
 
@@ -166,13 +183,25 @@
 		nodes.map((node) => {
 			const position = dragPositions[node.id] ?? optimisticPositions[node.id];
 			const size = resizeSizes[node.id] ?? optimisticSizes[node.id];
-			return position || size ? { ...node, ...position, ...size } : node;
+			const label = optimisticLabels[node.id];
+			const collapsed = optimisticCollapsed[node.id];
+			return position || size || label !== undefined || collapsed !== undefined
+				? {
+						...node,
+						...position,
+						...size,
+						...(label !== undefined ? { label } : {}),
+						...(collapsed !== undefined ? { collapsed } : {})
+					}
+				: node;
 		})
 	);
 	let nodesById = $derived(new Map(effectiveNodes.map((node) => [node.id, node])));
 	let checkerCellSizePx = $derived(Math.max(8, remPx * CHECKER_CELL_REM * camera.zoom));
 	let checkerSizePx = $derived(checkerCellSizePx * 2);
-	let transformStyle = $derived(`translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`);
+	let snappedCameraX = $derived(snapScreenPx(camera.x));
+	let snappedCameraY = $derived(snapScreenPx(camera.y));
+	let panStyle = $derived(`translate(${snappedCameraX}px, ${snappedCameraY}px)`);
 	let selectionBoxStyle = $derived.by(() => {
 		if (!selectionGesture) {
 			return '';
@@ -226,6 +255,49 @@
 		}
 	});
 
+	$effect(() => {
+		let next = optimisticLabels;
+		const labelsById = new Map(nodes.map((node) => [node.id, node.label]));
+		for (const [nodeId, label] of Object.entries(optimisticLabels)) {
+			if (labelsById.get(nodeId) === label || !labelsById.has(nodeId)) {
+				if (next === optimisticLabels) {
+					next = { ...optimisticLabels };
+				}
+				delete next[nodeId];
+			}
+		}
+		if (next !== optimisticLabels) {
+			optimisticLabels = next;
+		}
+	});
+
+	$effect(() => {
+		let next = optimisticCollapsed;
+		const collapsedById = new Map(nodes.map((node) => [node.id, node.collapsed === true]));
+		for (const [nodeId, collapsed] of Object.entries(optimisticCollapsed)) {
+			if (collapsedById.get(nodeId) === collapsed || !collapsedById.has(nodeId)) {
+				if (next === optimisticCollapsed) {
+					next = { ...optimisticCollapsed };
+				}
+				delete next[nodeId];
+			}
+		}
+		if (next !== optimisticCollapsed) {
+			optimisticCollapsed = next;
+		}
+	});
+
+	$effect(() => {
+		if (!renameInput || !renamingNodeId || focusedRenameNodeId === renamingNodeId) {
+			return;
+		}
+		focusedRenameNodeId = renamingNodeId;
+		requestAnimationFrame(() => {
+			renameInput?.focus();
+			renameInput?.select();
+		});
+	});
+
 	const clamp = (value: number, minimum: number, maximum: number): number =>
 		Math.min(maximum, Math.max(minimum, value));
 
@@ -245,25 +317,97 @@
 	const nodeWidth = (node: GraphNode): number =>
 		Math.max(MIN_NODE_WIDTH_REM, node.width ?? DEFAULT_NODE_WIDTH_REM);
 
+	const headerSublineText = (node: GraphNode): string =>
+		node.description?.trim() || node.subtitle?.trim() || '';
+
+	const wrappedLineCount = (text: string, node: GraphNode, averageCharWidthRem: number): number => {
+		const trimmed = text.trim();
+		if (!trimmed) {
+			return 0;
+		}
+		const socketSpace =
+			(node.collapsed === true
+				? (allNodeSockets(node, 'input').length > 0 ? 1.8 : 0) +
+					(allNodeSockets(node, 'output').length > 0 ? 1.8 : 0)
+				: (node.socketPlacement === 'header' ? node.inputs.length + node.outputs.length : 0) *
+					1.55) +
+			((node.headerInputs?.length ?? 0) > 0 && node.socketPlacement !== 'header' ? 1.2 : 0);
+		const availableRem = Math.max(4.5, nodeWidth(node) - socketSpace - 0.9);
+		const charsPerLine = Math.max(8, Math.floor(availableRem / averageCharWidthRem));
+		return Math.max(1, Math.ceil(trimmed.length / charsPerLine));
+	};
+
+	const nodeHeaderHeight = (node: GraphNode): number => {
+		const titleLines = wrappedLineCount(node.label, node, 0.43);
+		const sublineLines = wrappedLineCount(headerSublineText(node), node, 0.34);
+		return Math.max(
+			NODE_HEADER_REM,
+			0.34 + Math.max(1, titleLines) * 0.82 + sublineLines * 0.66 + 0.32
+		);
+	};
+
+	const socketStart = (node: GraphNode): number => nodeHeaderHeight(node) + 0.25 + NODE_BORDER_REM;
+
+	const allNodeSockets = (node: GraphNode, direction: GraphSocketDirection): GraphSocket[] =>
+		direction === 'input' ? [...node.inputs, ...(node.headerInputs ?? [])] : node.outputs;
+
+	const firstCollapsedSocket = (
+		node: GraphNode,
+		direction: GraphSocketDirection
+	): GraphSocket | null => {
+		const sockets = allNodeSockets(node, direction);
+		return sockets.find((socket) => socket.compatible !== false) ?? sockets[0] ?? null;
+	};
+
+	const collapsedSocketLabel = (node: GraphNode, direction: GraphSocketDirection): string => {
+		const sockets = allNodeSockets(node, direction);
+		if (sockets.length === 1) {
+			return sockets[0].label;
+		}
+		return direction === 'input' ? 'In' : 'Out';
+	};
+
+	const collapsedSocketTitle = (node: GraphNode, direction: GraphSocketDirection): string => {
+		const sockets = allNodeSockets(node, direction);
+		if (sockets.length === 1) {
+			return sockets[0].valueType ?? sockets[0].label;
+		}
+		return `${sockets.length} ${direction === 'input' ? 'inputs' : 'outputs'}`;
+	};
+
+	const collapsedSocketConnected = (node: GraphNode, direction: GraphSocketDirection): boolean =>
+		allNodeSockets(node, direction).some((socket) =>
+			connectedSockets.has(`${node.id}:${socket.id}`)
+		);
+
+	const collapsedSocketDraftTarget = (node: GraphNode, direction: GraphSocketDirection): boolean =>
+		direction === 'input' &&
+		connectionDraft?.snapNodeId === node.id &&
+		allNodeSockets(node, direction).some((socket) => connectionDraft?.snapSocketId === socket.id);
+
 	const minimumNodeHeight = (node: GraphNode): number =>
-		node.socketPlacement === 'header'
-			? NODE_HEADER_REM + NODE_BORDER_REM * 2 + 1.2
-			: Math.max(
-					NODE_HEADER_REM + NODE_BORDER_REM * 2 + 1.2,
-					NODE_HEADER_REM +
-						NODE_BORDER_REM * 2 +
-						1.4 +
-						Math.max(node.inputs.length, node.outputs.length, 1) * SOCKET_ROW_REM
-				);
+		node.collapsed === true
+			? nodeHeaderHeight(node) + NODE_BORDER_REM * 2
+			: node.socketPlacement === 'header'
+				? nodeHeaderHeight(node) + NODE_BORDER_REM * 2 + 1.2
+				: Math.max(
+						nodeHeaderHeight(node) + NODE_BORDER_REM * 2 + 1.2,
+						nodeHeaderHeight(node) +
+							NODE_BORDER_REM * 2 +
+							1.4 +
+							Math.max(node.inputs.length, node.outputs.length, 1) * SOCKET_ROW_REM
+					);
 
 	const nodeHeight = (node: GraphNode): number =>
-		Math.max(minimumNodeHeight(node), node.height ?? minimumNodeHeight(node));
+		node.collapsed === true
+			? minimumNodeHeight(node)
+			: Math.max(minimumNodeHeight(node), node.height ?? minimumNodeHeight(node));
 
 	let routingGeometryKey = $derived(
 		`${remPx}:${effectiveNodes
 			.map(
 				(node) =>
-					`${node.id}:${node.x}:${node.y}:${nodeWidth(node)}:${nodeHeight(node)}:${node.socketPlacement ?? 'body'}`
+					`${node.id}:${node.x}:${node.y}:${nodeWidth(node)}:${nodeHeight(node)}:${nodeHeaderHeight(node)}:${node.collapsed === true}:${node.socketPlacement ?? 'body'}`
 			)
 			.join('|')}`
 	);
@@ -353,6 +497,20 @@
 		if (!node) {
 			return null;
 		}
+		if (
+			node.collapsed === true &&
+			allNodeSockets(node, direction).some((socket) => socket.id === reference.socketId)
+		) {
+			return {
+				x:
+					(node.x +
+						(direction === 'output'
+							? nodeWidth(node) - HEADER_SOCKET_INSET_REM
+							: HEADER_SOCKET_INSET_REM)) *
+					remPx,
+				y: (node.y + NODE_BORDER_REM + nodeHeaderHeight(node) * 0.5) * remPx
+			};
+		}
 		if (node.socketPlacement === 'header') {
 			return {
 				x:
@@ -361,14 +519,23 @@
 							? nodeWidth(node) - HEADER_SOCKET_INSET_REM
 							: HEADER_SOCKET_INSET_REM)) *
 					remPx,
-				y: (node.y + NODE_BORDER_REM + NODE_HEADER_REM * 0.5) * remPx
+				y: (node.y + NODE_BORDER_REM + nodeHeaderHeight(node) * 0.5) * remPx
 			};
+		}
+		if (direction === 'input' && node.headerInputs) {
+			const headerIdx = node.headerInputs.findIndex((s) => s.id === reference.socketId);
+			if (headerIdx >= 0) {
+				return {
+					x: (node.x + HEADER_SOCKET_INSET_REM + headerIdx * SOCKET_ROW_REM * 0.8) * remPx,
+					y: (node.y + NODE_BORDER_REM + nodeHeaderHeight(node) * 0.5) * remPx
+				};
+			}
 		}
 		return {
 			x: (node.x + (direction === 'output' ? nodeWidth(node) : 0)) * remPx,
 			y:
 				(node.y +
-					SOCKET_START_REM +
+					socketStart(node) +
 					(socketIndex(node, reference.socketId, direction) + 0.5) * SOCKET_ROW_REM) *
 				remPx
 		};
@@ -1011,6 +1178,11 @@
 		event.stopPropagation();
 		container?.focus();
 		const target = event.target;
+		if (event.altKey && target instanceof Element && target.closest('.node-header')) {
+			event.preventDefault();
+			toggleNodeCollapsed(node);
+			return;
+		}
 		if (
 			target instanceof Element &&
 			target.closest('button, input, textarea, select, a, [data-no-node-select]')
@@ -1019,8 +1191,6 @@
 		}
 		if (event.ctrlKey || event.metaKey || event.shiftKey) {
 			updateSelection(node.id, true);
-		} else if (event.altKey && target instanceof Element && target.closest('.node-header')) {
-			node.active = true;
 		} else if (!selectedIds.has(node.id)) {
 			updateSelection(node.id, false);
 		}
@@ -1032,6 +1202,12 @@
 		}
 		event.stopPropagation();
 		container?.focus();
+		const target = event.target;
+		if (event.altKey && target instanceof Element && target.closest('.node-header')) {
+			event.preventDefault();
+			toggleNodeCollapsed(node);
+			return;
+		}
 		const additive = event.ctrlKey || event.metaKey || event.shiftKey;
 		let dragIds: Set<string>;
 		if (additive) {
@@ -1126,11 +1302,19 @@
 		}
 	};
 
+	const findInputSocket = (
+		node: GraphNode | undefined,
+		socketId: string
+	): GraphSocket | undefined =>
+		node?.inputs.find((c) => c.id === socketId) ??
+		node?.headerInputs?.find((c) => c.id === socketId);
+
 	const finishConnectionAtPointer = (event: PointerEvent): void => {
 		if (connectionDraft?.snapNodeId && connectionDraft?.snapSocketId) {
-			const socket = nodesById
-				.get(connectionDraft.snapNodeId)
-				?.inputs.find((candidate) => candidate.id === connectionDraft!.snapSocketId);
+			const socket = findInputSocket(
+				nodesById.get(connectionDraft.snapNodeId),
+				connectionDraft.snapSocketId
+			);
 			if (socket) {
 				completeConnection(connectionDraft.snapNodeId, socket);
 				return;
@@ -1147,7 +1331,7 @@
 		if (!nodeId || !socketId) {
 			return;
 		}
-		const socket = nodesById.get(nodeId)?.inputs.find((candidate) => candidate.id === socketId);
+		const socket = findInputSocket(nodesById.get(nodeId), socketId);
 		if (socket) {
 			completeConnection(nodeId, socket);
 		}
@@ -1215,7 +1399,7 @@
 			for (const node of effectiveNodes) {
 				if (node.id === connectionDraft.from.nodeId) continue;
 
-				for (const socket of node.inputs) {
+				for (const socket of [...node.inputs, ...(node.headerInputs ?? [])]) {
 					if (socket.compatible === false) continue;
 					const pt = socketPoint({ nodeId: node.id, socketId: socket.id }, 'input');
 					if (!pt) continue;
@@ -1315,6 +1499,124 @@
 		}
 	};
 
+	const clearOptimisticRename = (nodeId: string, label: string): void => {
+		if (optimisticLabels[nodeId] !== label) {
+			return;
+		}
+		const next = { ...optimisticLabels };
+		delete next[nodeId];
+		optimisticLabels = next;
+	};
+
+	const clearOptimisticCollapse = (nodeId: string, collapsed: boolean): void => {
+		if (optimisticCollapsed[nodeId] !== collapsed) {
+			return;
+		}
+		const next = { ...optimisticCollapsed };
+		delete next[nodeId];
+		optimisticCollapsed = next;
+	};
+
+	const toggleNodeCollapsed = (node: GraphNode): void => {
+		const collapsed = node.collapsed !== true;
+		optimisticCollapsed = { ...optimisticCollapsed, [node.id]: collapsed };
+		try {
+			void Promise.resolve(onNodeCollapsedChange?.(node.id, collapsed)).catch(() =>
+				clearOptimisticCollapse(node.id, collapsed)
+			);
+		} catch {
+			clearOptimisticCollapse(node.id, collapsed);
+		}
+	};
+
+	const canRenameNode = (node: GraphNode): boolean =>
+		onNodeRename !== undefined && node.canRename !== false;
+
+	const isPurePrimaryClick = (event: MouseEvent | PointerEvent): boolean =>
+		event.button === 0 && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
+
+	const beginNodeRename = (event: MouseEvent, node: GraphNode): void => {
+		if (!canRenameNode(node) || !isPurePrimaryClick(event)) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		if (!selectedIds.has(node.id)) {
+			updateSelection(node.id, false);
+		}
+		renamingNodeId = node.id;
+		renameDraft = node.label;
+		focusedRenameNodeId = null;
+	};
+
+	const handleNodeTitlePointerDown = (event: PointerEvent, node: GraphNode): void => {
+		if (!isPurePrimaryClick(event)) {
+			lastTitlePointerDown = null;
+			startNodeDrag(event, node);
+			return;
+		}
+		const elapsed = lastTitlePointerDown ? event.timeStamp - lastTitlePointerDown.time : Infinity;
+		const distance = lastTitlePointerDown
+			? Math.hypot(event.clientX - lastTitlePointerDown.x, event.clientY - lastTitlePointerDown.y)
+			: Infinity;
+		const doubleClick =
+			lastTitlePointerDown?.nodeId === node.id &&
+			elapsed >= 0 &&
+			elapsed <= TITLE_DOUBLE_CLICK_MS &&
+			distance <= TITLE_DOUBLE_CLICK_DISTANCE_PX;
+		if (doubleClick && canRenameNode(node)) {
+			lastTitlePointerDown = null;
+			beginNodeRename(event, node);
+			return;
+		}
+		lastTitlePointerDown = {
+			nodeId: node.id,
+			time: event.timeStamp,
+			x: event.clientX,
+			y: event.clientY
+		};
+		startNodeDrag(event, node);
+	};
+
+	const finishNodeRename = (): void => {
+		const nodeId = renamingNodeId;
+		if (!nodeId) {
+			return;
+		}
+		const node = nodes.find((candidate) => candidate.id === nodeId);
+		const label = renameDraft.trim();
+		renamingNodeId = null;
+		renameInput = null;
+		focusedRenameNodeId = null;
+		if (!node || !label || label === node.label) {
+			return;
+		}
+		optimisticLabels = { ...optimisticLabels, [nodeId]: label };
+		try {
+			void Promise.resolve(onNodeRename?.(nodeId, label)).catch(() =>
+				clearOptimisticRename(nodeId, label)
+			);
+		} catch {
+			clearOptimisticRename(nodeId, label);
+		}
+	};
+
+	const cancelNodeRename = (): void => {
+		renamingNodeId = null;
+		renameInput = null;
+		focusedRenameNodeId = null;
+	};
+
+	const handleRenameKeydown = (event: KeyboardEvent): void => {
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			finishNodeRename();
+		} else if (event.key === 'Escape') {
+			event.preventDefault();
+			cancelNodeRename();
+		}
+	};
+
 	const handlePointerEnd = (event: PointerEvent): void => {
 		if (selectionGesture?.pointerId === event.pointerId) {
 			finishSelectionGesture();
@@ -1369,14 +1671,14 @@
 
 	const handleContextMenu = (event: MouseEvent): void => {
 		const target = event.target;
+		event.preventDefault();
+		event.stopPropagation();
 		if (
 			!onBackgroundContextMenu ||
 			(target instanceof Element && target.closest('.node, .toolbar'))
 		) {
 			return;
 		}
-		event.preventDefault();
-		event.stopPropagation();
 		onBackgroundContextMenu?.(event, clientToWorld(event.clientX, event.clientY));
 	};
 
@@ -1449,8 +1751,9 @@
 	aria-label="Node graph"
 	tabindex="0"
 	style:--checker-size={`${checkerSizePx}px`}
-	style:--camera-x={`${camera.x}px`}
-	style:--camera-y={`${camera.y}px`}
+	style:--camera-x={`${snappedCameraX}px`}
+	style:--camera-y={`${snappedCameraY}px`}
+	style:--camera-zoom={`${camera.zoom}`}
 	onpointerdown={startPan}
 	onpointermove={handlePointerMove}
 	onpointerup={handlePointerEnd}
@@ -1487,101 +1790,74 @@
 		</div>
 	</div>
 
-	<div class="world" style:transform={transformStyle}>
-		<svg class="wires" aria-label="Graph connections">
-			{#each visibleEdges as edge, index (`${edge.id ?? index}:${edge.from.nodeId}:${edge.to.nodeId}`)}
-				{@const path = edgePath(edge)}
-				{#if path}
-					<path
-						d={path}
-						class="edge-hit"
-						role="button"
-						tabindex="0"
-						aria-label="Select connection"
-						aria-pressed={edge.id !== undefined && selectedEdgeIdSet.has(edge.id)}
-						vector-effect="non-scaling-stroke"
-						onpointerdown={(event) => selectEdge(event, edge)}
-						onkeydown={(event) => selectEdgeWithKeyboard(event, edge)} />
-					<path
-						d={path}
-						class="edge"
-						class:active={edge.active}
-						class:invalid={edge.invalid}
-						class:selected={edge.id !== undefined && selectedEdgeIdSet.has(edge.id)}
-						style:--edge-color={edge.color}
-						vector-effect="non-scaling-stroke" />
+	<div class="world-pan" style:transform={panStyle}>
+		<div class="world">
+			<svg class="wires" aria-label="Graph connections">
+				{#each visibleEdges as edge, index (`${edge.id ?? index}:${edge.from.nodeId}:${edge.to.nodeId}`)}
+					{@const path = edgePath(edge)}
+					{#if path}
+						<path
+							d={path}
+							class="edge-hit"
+							role="button"
+							tabindex="0"
+							aria-label="Select connection"
+							aria-pressed={edge.id !== undefined && selectedEdgeIdSet.has(edge.id)}
+							vector-effect="non-scaling-stroke"
+							onpointerdown={(event) => selectEdge(event, edge)}
+							onkeydown={(event) => selectEdgeWithKeyboard(event, edge)} />
+						<path
+							d={path}
+							class="edge"
+							class:active={edge.active}
+							class:invalid={edge.invalid}
+							class:selected={edge.id !== undefined && selectedEdgeIdSet.has(edge.id)}
+							style:--edge-color={edge.color}
+							vector-effect="non-scaling-stroke" />
+					{/if}
+				{/each}
+				{#if draftPath()}
+					<path class="draft" d={draftPath() ?? ''} vector-effect="non-scaling-stroke" />
 				{/if}
-			{/each}
-			{#if draftPath()}
-				<path class="draft" d={draftPath() ?? ''} vector-effect="non-scaling-stroke" />
-			{/if}
-		</svg>
+			</svg>
 
-		{#each visibleNodes as node (node.id)}
-			<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-			<article
-				class:selected={selectedIds.has(node.id)}
-				class:active={node.active}
-				class:invalid={node.invalid}
-				class:draft-target={connectionDraft?.snapNodeId === node.id}
-				class="node"
-				style:left={`${node.x}rem`}
-				style:top={`${node.y}rem`}
-				style:width={`${nodeWidth(node)}rem`}
-				style:height={`${nodeHeight(node)}rem`}
-				style:--node-accent={node.color ?? 'var(--ga-outline)'}
-				onpointerdown={(event) => selectNodeBody(event, node)}>
-				<div class="node-header">
-					{#if node.socketPlacement === 'header'}
-						<div class="header-socket-list inputs">
-							{#each node.inputs as socket (socket.id)}
+			{#each visibleNodes as node (node.id)}
+				<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+				<article
+					class:selected={selectedIds.has(node.id)}
+					class:active={node.active}
+					class:collapsed={node.collapsed === true}
+					class:invalid={node.invalid}
+					class:draft-target={connectionDraft?.snapNodeId === node.id}
+					class="node"
+					style:left={`${node.x}rem`}
+					style:top={`${node.y}rem`}
+					style:width={`${nodeWidth(node)}rem`}
+					style:height={`${nodeHeight(node)}rem`}
+					style:--node-accent={node.color ?? 'var(--ga-outline)'}
+					style:--node-header-height={`${nodeHeaderHeight(node)}rem`}
+					onpointerdown={(event) => selectNodeBody(event, node)}>
+					<div class="node-header">
+						{#if node.collapsed === true && firstCollapsedSocket(node, 'input')}
+							{@const socket = firstCollapsedSocket(node, 'input') as GraphSocket}
+							<div class="header-socket-list inputs collapsed-sockets">
 								<button
 									type="button"
 									class:incompatible={socket.compatible === false}
-									class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
-									class:draft-target={connectionDraft?.snapNodeId === node.id &&
-										connectionDraft?.snapSocketId === socket.id}
-									class="socket header-socket input"
+									class:connected={collapsedSocketConnected(node, 'input')}
+									class:draft-target={collapsedSocketDraftTarget(node, 'input')}
+									class="socket header-socket input collapsed-socket"
 									data-node-id={node.id}
 									data-socket-id={socket.id}
-									title={socket.valueType ?? socket.label}
+									title={collapsedSocketTitle(node, 'input')}
 									onpointerup={(event) => finishConnection(event, node.id, socket)}>
 									<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}
 									></span>
-									<span>{socket.label}</span>
+									<span>{collapsedSocketLabel(node, 'input')}</span>
 								</button>
-							{/each}
-						</div>
-					{/if}
-					<button
-						type="button"
-						class="node-title"
-						onpointerdown={(event) => startNodeDrag(event, node)}>
-						<strong>{node.label}</strong>
-						{#if node.subtitle}<small>{node.subtitle}</small>{/if}
-					</button>
-					{#if node.socketPlacement === 'header'}
-						<div class="header-socket-list outputs">
-							{#each node.outputs as socket (socket.id)}
-								<button
-									type="button"
-									class:incompatible={socket.compatible === false}
-									class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
-									class="socket header-socket output"
-									title={socket.valueType ?? socket.label}
-									onpointerdown={(event) => startConnection(event, node.id, socket)}>
-									<span>{socket.label}</span>
-									<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}
-									></span>
-								</button>
-							{/each}
-						</div>
-					{/if}
-				</div>
-				<div class="node-body">
-					{#if node.socketPlacement !== 'header'}
-						<div class="socket-columns">
-							<div class="socket-list inputs">
+							</div>
+						{:else if node.socketPlacement === 'header'}
+							<div class="header-socket-list inputs">
 								{#each node.inputs as socket (socket.id)}
 									<button
 										type="button"
@@ -1589,7 +1865,7 @@
 										class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
 										class:draft-target={connectionDraft?.snapNodeId === node.id &&
 											connectionDraft?.snapSocketId === socket.id}
-										class="socket input"
+										class="socket header-socket input"
 										data-node-id={node.id}
 										data-socket-id={socket.id}
 										title={socket.valueType ?? socket.label}
@@ -1600,13 +1876,89 @@
 									</button>
 								{/each}
 							</div>
-							<div class="socket-list outputs">
+						{:else if node.headerInputs && node.headerInputs.length > 0}
+							<div class="header-socket-list inputs header-inputs-extra">
+								{#each node.headerInputs as socket (socket.id)}
+									<button
+										type="button"
+										class:incompatible={socket.compatible === false}
+										class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
+										class:draft-target={connectionDraft?.snapNodeId === node.id &&
+											connectionDraft?.snapSocketId === socket.id}
+										class="socket header-socket input"
+										data-node-id={node.id}
+										data-socket-id={socket.id}
+										title={socket.valueType ?? socket.label}
+										onpointerup={(event) => finishConnection(event, node.id, socket)}>
+										<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}
+										></span>
+									</button>
+								{/each}
+							</div>
+						{/if}
+						{#if renamingNodeId === node.id}
+							<div
+								class="node-title renaming"
+								title={node.description?.trim() || node.subtitle || node.label}>
+								<input
+									bind:this={renameInput}
+									class="node-title-input"
+									value={renameDraft}
+									aria-label={`Rename ${node.label}`}
+									oninput={(event) =>
+										(renameDraft = (event.currentTarget as HTMLInputElement).value)}
+									onkeydown={handleRenameKeydown}
+									onblur={finishNodeRename}
+									onpointerdown={(event) => event.stopPropagation()}
+									onclick={(event) => event.stopPropagation()} />
+							</div>
+						{:else}
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<div
+								class="node-title"
+								title={node.description?.trim() || node.subtitle || node.label}
+								onpointerdown={(event) => handleNodeTitlePointerDown(event, node)}>
+								<button
+									type="button"
+									class="node-title-label"
+									class:editable={canRenameNode(node)}
+									aria-disabled={!canRenameNode(node)}
+									title={node.description?.trim() || node.subtitle || node.label}
+									ondblclick={(event) => beginNodeRename(event, node)}
+									onpointerdown={(event) => handleNodeTitlePointerDown(event, node)}
+									onclick={(event) => event.stopPropagation()}>
+									<strong>{node.label}</strong>
+								</button>
+								{#if node.description?.trim()}
+									<small>{node.description}</small>
+								{:else if node.subtitle}
+									<small>{node.subtitle}</small>
+								{/if}
+							</div>
+						{/if}
+						{#if node.collapsed === true && firstCollapsedSocket(node, 'output')}
+							{@const socket = firstCollapsedSocket(node, 'output') as GraphSocket}
+							<div class="header-socket-list outputs collapsed-sockets">
+								<button
+									type="button"
+									class:incompatible={socket.compatible === false}
+									class:connected={collapsedSocketConnected(node, 'output')}
+									class="socket header-socket output collapsed-socket"
+									title={collapsedSocketTitle(node, 'output')}
+									onpointerdown={(event) => startConnection(event, node.id, socket)}>
+									<span>{collapsedSocketLabel(node, 'output')}</span>
+									<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}
+									></span>
+								</button>
+							</div>
+						{:else if node.socketPlacement === 'header'}
+							<div class="header-socket-list outputs">
 								{#each node.outputs as socket (socket.id)}
 									<button
 										type="button"
 										class:incompatible={socket.compatible === false}
 										class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
-										class="socket output"
+										class="socket header-socket output"
 										title={socket.valueType ?? socket.label}
 										onpointerdown={(event) => startConnection(event, node.id, socket)}>
 										<span>{socket.label}</span>
@@ -1615,24 +1967,66 @@
 									</button>
 								{/each}
 							</div>
+						{/if}
+					</div>
+					{#if node.collapsed !== true}
+						<div class="node-body">
+							{#if node.socketPlacement !== 'header'}
+								<div class="socket-columns">
+									<div class="socket-list inputs">
+										{#each node.inputs as socket (socket.id)}
+											<button
+												type="button"
+												class:incompatible={socket.compatible === false}
+												class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
+												class:draft-target={connectionDraft?.snapNodeId === node.id &&
+													connectionDraft?.snapSocketId === socket.id}
+												class="socket input"
+												data-node-id={node.id}
+												data-socket-id={socket.id}
+												title={socket.valueType ?? socket.label}
+												onpointerup={(event) => finishConnection(event, node.id, socket)}>
+												<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}
+												></span>
+												<span>{socket.label}</span>
+											</button>
+										{/each}
+									</div>
+									<div class="socket-list outputs">
+										{#each node.outputs as socket (socket.id)}
+											<button
+												type="button"
+												class:incompatible={socket.compatible === false}
+												class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
+												class="socket output"
+												title={socket.valueType ?? socket.label}
+												onpointerdown={(event) => startConnection(event, node.id, socket)}>
+												<span>{socket.label}</span>
+												<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}
+												></span>
+											</button>
+										{/each}
+									</div>
+								</div>
+							{/if}
+							{#if nodeContent}
+								<div class="node-content" data-no-node-select>
+									{@render nodeContent(node)}
+								</div>
+							{/if}
 						</div>
 					{/if}
-					{#if nodeContent}
-						<div class="node-content" data-no-node-select>
-							{@render nodeContent(node)}
-						</div>
+					{#if node.resizable && node.collapsed !== true}
+						<button
+							type="button"
+							class="resize-handle"
+							aria-label={`Resize ${node.label}`}
+							title={`Resize ${node.label}`}
+							onpointerdown={(event) => startNodeResize(event, node)}></button>
 					{/if}
-				</div>
-				{#if node.resizable}
-					<button
-						type="button"
-						class="resize-handle"
-						aria-label={`Resize ${node.label}`}
-						title={`Resize ${node.label}`}
-						onpointerdown={(event) => startNodeResize(event, node)}></button>
-				{/if}
-			</article>
-		{/each}
+				</article>
+			{/each}
+		</div>
 	</div>
 
 	{#if selectionGesture}
@@ -1693,11 +2087,19 @@
 		cursor: crosshair;
 	}
 
+	.world-pan,
 	.world {
 		position: absolute;
 		inset: 0 auto auto 0;
 		transform-origin: 0 0;
+	}
+
+	.world-pan {
 		will-change: transform;
+	}
+
+	.world {
+		zoom: var(--camera-zoom, 1);
 	}
 
 	.wires {
@@ -1769,7 +2171,14 @@
 		background: var(--ga-node);
 		box-shadow: 0 0.55rem 1.3rem rgb(0 0 0 / 0.28);
 		color: var(--gc-color-text, #e8edf6);
-		overflow: visible;
+		overflow: hidden;
+		transition:
+			height 0.18s cubic-bezier(0.2, 0, 0.13, 1),
+			border-color 0.1s ease,
+			box-shadow 0.1s ease;
+	}
+
+	.graph-canvas.node-resizing .node {
 		transition:
 			border-color 0.1s ease,
 			box-shadow 0.1s ease;
@@ -1806,7 +2215,8 @@
 		display: flex;
 		align-items: stretch;
 		inline-size: 100%;
-		block-size: 1.8rem;
+		block-size: var(--node-header-height, 1.8rem);
+		min-block-size: var(--node-header-height, 1.8rem);
 		box-sizing: border-box;
 		border-block-end: solid 0.06rem color-mix(in srgb, var(--node-accent) 62%, transparent);
 		border-radius: 0.48rem 0.48rem 0 0;
@@ -1815,23 +2225,63 @@
 		overflow: hidden;
 	}
 
+	.node.collapsed .node-header {
+		border-block-end: 0;
+		border-radius: 0.48rem;
+	}
+
 	.node-title {
 		display: flex;
 		flex: 1 1 auto;
 		flex-direction: column;
+		align-items: center;
 		justify-content: center;
 		min-inline-size: 0;
 		padding: 0.15rem 0.35rem;
+		box-sizing: border-box;
 		border: 0;
 		background: transparent;
 		color: inherit;
 		font: inherit;
-		text-align: start;
+		text-align: center;
 		cursor: default;
 	}
 
 	.graph-canvas.node-dragging .node-title {
 		cursor: grabbing;
+	}
+
+	.node-title.renaming {
+		cursor: text;
+	}
+
+	.node-title-label {
+		display: block;
+		inline-size: 100%;
+		min-inline-size: 0;
+		max-inline-size: 100%;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		font: inherit;
+		font-weight: 700;
+		text-align: center;
+		cursor: default;
+	}
+
+	.node-title-input {
+		inline-size: 100%;
+		min-inline-size: 0;
+		padding: 0.12rem 0.2rem;
+		border: solid 0.06rem color-mix(in srgb, var(--ga-selection) 76%, transparent);
+		border-radius: 0.25rem;
+		background: color-mix(in srgb, var(--ga-bg) 86%, transparent);
+		color: inherit;
+		font: inherit;
+		font-size: 0.76rem;
+		font-weight: 700;
+		outline: none;
 	}
 
 	.node.active .node-header {
@@ -1840,17 +2290,19 @@
 
 	.node strong,
 	.node small {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		display: block;
+		overflow-wrap: anywhere;
+		white-space: normal;
 	}
 
 	.node strong {
 		font-size: 0.76rem;
+		line-height: 1.08;
 	}
 
 	.node small {
 		font-size: 0.64rem;
+		line-height: 1.1;
 		opacity: 0.62;
 	}
 
@@ -1868,11 +2320,16 @@
 		font-size: 0.64rem;
 	}
 
+	.collapsed-socket {
+		min-inline-size: 1.75rem;
+		justify-content: center;
+	}
+
 	.node-body {
 		display: flex;
 		flex-direction: column;
 		box-sizing: border-box;
-		block-size: calc(100% - 1.8rem);
+		block-size: calc(100% - var(--node-header-height, 1.8rem));
 		min-block-size: 2.2rem;
 	}
 
