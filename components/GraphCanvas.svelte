@@ -166,7 +166,7 @@
 	let dragPositions = $state<Record<string, GraphNodePosition>>({});
 	let optimisticPositions = $state<Record<string, GraphNodePosition>>({});
 	let resizeSizes = $state<Record<string, GraphNodeSize>>({});
-	let optimisticSizes = $state<Record<string, GraphNodeSize>>({});
+	let optimisticSizes = $state<Record<string, GraphNodeSize | null>>({});
 	let optimisticLabels = $state<Record<string, string>>({});
 	let optimisticCollapsed = $state<Record<string, boolean>>({});
 	let renamingNodeId: string | null = $state(null);
@@ -174,6 +174,7 @@
 	let renameInput: HTMLInputElement | null = $state(null);
 	let focusedRenameNodeId: string | null = null;
 	let lastTitlePointerDown: { nodeId: string; time: number; x: number; y: number } | null = null;
+	let lastResizePointerDown: { nodeId: string; time: number; x: number; y: number } | null = null;
 	let animationFrame: number | null = null;
 	const routedPathCache = new Map<string, string>();
 
@@ -182,14 +183,17 @@
 	let effectiveNodes = $derived(
 		nodes.map((node) => {
 			const position = dragPositions[node.id] ?? optimisticPositions[node.id];
-			const size = resizeSizes[node.id] ?? optimisticSizes[node.id];
+			const size = node.id in resizeSizes ? resizeSizes[node.id] : optimisticSizes[node.id];
 			const label = optimisticLabels[node.id];
 			const collapsed = optimisticCollapsed[node.id];
-			return position || size || label !== undefined || collapsed !== undefined
+			return position !== undefined ||
+				size !== undefined ||
+				label !== undefined ||
+				collapsed !== undefined
 				? {
 						...node,
-						...position,
-						...size,
+						...(position !== undefined ? { position } : {}),
+						...(size !== undefined ? { size: size ?? undefined } : {}),
 						...(label !== undefined ? { label } : {}),
 						...(collapsed !== undefined ? { collapsed } : {})
 					}
@@ -219,8 +223,8 @@
 			const optimistic = next[node.id];
 			if (
 				optimistic &&
-				Math.abs(node.x - optimistic.x) < 0.0001 &&
-				Math.abs(node.y - optimistic.y) < 0.0001
+				Math.abs(node.position.x - optimistic.x) < 0.0001 &&
+				Math.abs(node.position.y - optimistic.y) < 0.0001
 			) {
 				if (next === optimisticPositions) {
 					next = { ...optimisticPositions };
@@ -238,11 +242,12 @@
 		for (const node of nodes) {
 			const optimistic = next[node.id];
 			if (
-				optimistic &&
-				typeof node.width === 'number' &&
-				typeof node.height === 'number' &&
-				Math.abs(node.width - optimistic.width) < 0.0001 &&
-				Math.abs(node.height - optimistic.height) < 0.0001
+				optimistic !== undefined &&
+				((optimistic === null && node.size === undefined) ||
+					(optimistic !== null &&
+						node.size !== undefined &&
+						Math.abs(node.size.width - optimistic.width) < 0.0001 &&
+						Math.abs(node.size.height - optimistic.height) < 0.0001))
 			) {
 				if (next === optimisticSizes) {
 					next = { ...optimisticSizes };
@@ -314,8 +319,16 @@
 		}
 	};
 
+	const nodeAutomaticSize = (node: GraphNode): GraphNodeSize | undefined => {
+		const size = node.automaticSize;
+		return size && size.width > 0 && size.height > 0 ? size : undefined;
+	};
+
 	const nodeWidth = (node: GraphNode): number =>
-		Math.max(MIN_NODE_WIDTH_REM, node.width ?? DEFAULT_NODE_WIDTH_REM);
+		Math.max(
+			MIN_NODE_WIDTH_REM,
+			node.size?.width ?? nodeAutomaticSize(node)?.width ?? DEFAULT_NODE_WIDTH_REM
+		);
 
 	const headerSublineText = (node: GraphNode): string =>
 		node.description?.trim() || node.subtitle?.trim() || '';
@@ -401,13 +414,16 @@
 	const nodeHeight = (node: GraphNode): number =>
 		node.collapsed === true
 			? minimumNodeHeight(node)
-			: Math.max(minimumNodeHeight(node), node.height ?? minimumNodeHeight(node));
+			: Math.max(
+					minimumNodeHeight(node),
+					node.size?.height ?? nodeAutomaticSize(node)?.height ?? minimumNodeHeight(node)
+				);
 
 	let routingGeometryKey = $derived(
 		`${remPx}:${effectiveNodes
 			.map(
 				(node) =>
-					`${node.id}:${node.x}:${node.y}:${nodeWidth(node)}:${nodeHeight(node)}:${nodeHeaderHeight(node)}:${node.collapsed === true}:${node.socketPlacement ?? 'body'}`
+					`${node.id}:${node.position.x}:${node.position.y}:${nodeWidth(node)}:${nodeHeight(node)}:${nodeHeaderHeight(node)}:${node.collapsed === true}:${node.socketPlacement ?? 'body'}`
 			)
 			.join('|')}`
 	);
@@ -425,10 +441,10 @@
 		const bottom = (viewportHeight - camera.y) / camera.zoom / remPx + margin;
 		return effectiveNodes.filter(
 			(node) =>
-				node.x + nodeWidth(node) >= left &&
-				node.x <= right &&
-				node.y + nodeHeight(node) >= top &&
-				node.y <= bottom
+				node.position.x + nodeWidth(node) >= left &&
+				node.position.x <= right &&
+				node.position.y + nodeHeight(node) >= top &&
+				node.position.y <= bottom
 		);
 	});
 	let visibleNodeIds = $derived(new Set(visibleNodes.map((node) => node.id)));
@@ -448,10 +464,10 @@
 	let routingObstacles = $derived.by((): RoutingObstacle[] => {
 		const clearance = ROUTING_CLEARANCE_REM * remPx;
 		return effectiveNodes.map((node) => ({
-			left: node.x * remPx - clearance,
-			top: node.y * remPx - clearance,
-			right: (node.x + nodeWidth(node)) * remPx + clearance,
-			bottom: (node.y + nodeHeight(node)) * remPx + clearance
+			left: node.position.x * remPx - clearance,
+			top: node.position.y * remPx - clearance,
+			right: (node.position.x + nodeWidth(node)) * remPx + clearance,
+			bottom: (node.position.y + nodeHeight(node)) * remPx + clearance
 		}));
 	});
 	let routingObstacleBuckets = $derived.by(() => {
@@ -503,38 +519,38 @@
 		) {
 			return {
 				x:
-					(node.x +
+					(node.position.x +
 						(direction === 'output'
 							? nodeWidth(node) - HEADER_SOCKET_INSET_REM
 							: HEADER_SOCKET_INSET_REM)) *
 					remPx,
-				y: (node.y + NODE_BORDER_REM + nodeHeaderHeight(node) * 0.5) * remPx
+				y: (node.position.y + NODE_BORDER_REM + nodeHeaderHeight(node) * 0.5) * remPx
 			};
 		}
 		if (node.socketPlacement === 'header') {
 			return {
 				x:
-					(node.x +
+					(node.position.x +
 						(direction === 'output'
 							? nodeWidth(node) - HEADER_SOCKET_INSET_REM
 							: HEADER_SOCKET_INSET_REM)) *
 					remPx,
-				y: (node.y + NODE_BORDER_REM + nodeHeaderHeight(node) * 0.5) * remPx
+				y: (node.position.y + NODE_BORDER_REM + nodeHeaderHeight(node) * 0.5) * remPx
 			};
 		}
 		if (direction === 'input' && node.headerInputs) {
 			const headerIdx = node.headerInputs.findIndex((s) => s.id === reference.socketId);
 			if (headerIdx >= 0) {
 				return {
-					x: (node.x + HEADER_SOCKET_INSET_REM + headerIdx * SOCKET_ROW_REM * 0.8) * remPx,
-					y: (node.y + NODE_BORDER_REM + nodeHeaderHeight(node) * 0.5) * remPx
+					x: (node.position.x + HEADER_SOCKET_INSET_REM + headerIdx * SOCKET_ROW_REM * 0.8) * remPx,
+					y: (node.position.y + NODE_BORDER_REM + nodeHeaderHeight(node) * 0.5) * remPx
 				};
 			}
 		}
 		return {
-			x: (node.x + (direction === 'output' ? nodeWidth(node) : 0)) * remPx,
+			x: (node.position.x + (direction === 'output' ? nodeWidth(node) : 0)) * remPx,
 			y:
-				(node.y +
+				(node.position.y +
 					socketStart(node) +
 					(socketIndex(node, reference.socketId, direction) + 0.5) * SOCKET_ROW_REM) *
 				remPx
@@ -873,12 +889,13 @@
 		const clearance = ROUTING_CLEARANCE_REM * remPx;
 		const routeStart = {
 			x:
-				Math.ceil(((sourceNode.x + nodeWidth(sourceNode)) * remPx + clearance) / grid) * grid +
+				Math.ceil(((sourceNode.position.x + nodeWidth(sourceNode)) * remPx + clearance) / grid) *
+					grid +
 				grid,
 			y: start.y
 		};
 		const routeEnd = {
-			x: Math.floor((targetNode.x * remPx - clearance) / grid) * grid - grid,
+			x: Math.floor((targetNode.position.x * remPx - clearance) / grid) * grid - grid,
 			y: end.y
 		};
 		const gridStart = { x: routeStart.x, y: Math.round(routeStart.y / grid) * grid };
@@ -1012,10 +1029,10 @@
 		if (!container || candidates.length === 0) {
 			return false;
 		}
-		const left = Math.min(...candidates.map((node) => node.x));
-		const top = Math.min(...candidates.map((node) => node.y));
-		const right = Math.max(...candidates.map((node) => node.x + nodeWidth(node)));
-		const bottom = Math.max(...candidates.map((node) => node.y + nodeHeight(node)));
+		const left = Math.min(...candidates.map((node) => node.position.x));
+		const top = Math.min(...candidates.map((node) => node.position.y));
+		const right = Math.max(...candidates.map((node) => node.position.x + nodeWidth(node)));
+		const bottom = Math.max(...candidates.map((node) => node.position.y + nodeHeight(node)));
 		const widthPx = Math.max(remPx, (right - left) * remPx);
 		const heightPx = Math.max(remPx, (bottom - top) * remPx);
 		const paddingPx = FRAME_PADDING_REM * remPx;
@@ -1129,8 +1146,8 @@
 		}
 		const next = new Set(selectionGesture.initialSelectedNodeIds);
 		for (const node of effectiveNodes) {
-			const nodeLeft = camera.x + node.x * remPx * camera.zoom;
-			const nodeTop = camera.y + node.y * remPx * camera.zoom;
+			const nodeLeft = camera.x + node.position.x * remPx * camera.zoom;
+			const nodeTop = camera.y + node.position.y * remPx * camera.zoom;
 			const nodeRight = nodeLeft + nodeWidth(node) * remPx * camera.zoom;
 			const nodeBottom = nodeTop + nodeHeight(node) * remPx * camera.zoom;
 			if (nodeRight >= left && nodeLeft <= right && nodeBottom >= top && nodeTop <= bottom) {
@@ -1232,7 +1249,7 @@
 		for (const dragId of dragIds) {
 			const dragNode = nodesById.get(dragId);
 			if (dragNode) {
-				nodePositions[dragId] = { x: dragNode.x, y: dragNode.y };
+				nodePositions[dragId] = dragNode.position;
 			}
 		}
 		nodeDragGesture = {
@@ -1248,8 +1265,30 @@
 		if (event.button !== 0 || !node.resizable) {
 			return;
 		}
+		event.preventDefault();
 		event.stopPropagation();
 		container?.focus();
+		const now = Date.now();
+		const previousPointerDown = lastResizePointerDown;
+		lastResizePointerDown = {
+			nodeId: node.id,
+			time: now,
+			x: event.clientX,
+			y: event.clientY
+		};
+		if (
+			previousPointerDown?.nodeId === node.id &&
+			now - previousPointerDown.time <= TITLE_DOUBLE_CLICK_MS &&
+			Math.hypot(event.clientX - previousPointerDown.x, event.clientY - previousPointerDown.y) <=
+				TITLE_DOUBLE_CLICK_DISTANCE_PX
+		) {
+			lastResizePointerDown = null;
+			if (!selectedIds.has(node.id)) {
+				updateSelection(node.id, false);
+			}
+			commitNodeResize({ nodeId: node.id, mode: 'automatic' });
+			return;
+		}
 		if (!selectedIds.has(node.id)) {
 			updateSelection(node.id, false);
 		}
@@ -1414,8 +1453,8 @@
 
 				// Snap to node header if close to the node bounds and it has exactly one compatible input
 				if (node.inputs.length === 1 && node.inputs[0].compatible !== false) {
-					const left = node.x * remPx;
-					const top = node.y * remPx;
+					const left = node.position.x * remPx;
+					const top = node.position.y * remPx;
 					const right = left + nodeWidth(node) * remPx;
 					const bottom = top + nodeHeight(node) * remPx;
 
@@ -1480,7 +1519,11 @@
 
 	const clearOptimisticResize = (resize: GraphNodeResize): void => {
 		const pending = optimisticSizes[resize.nodeId];
-		if (pending?.width === resize.size.width && pending?.height === resize.size.height) {
+		const matches =
+			resize.mode === 'automatic'
+				? pending === null
+				: pending?.width === resize.size.width && pending?.height === resize.size.height;
+		if (matches) {
 			const next = { ...optimisticSizes };
 			delete next[resize.nodeId];
 			optimisticSizes = next;
@@ -1490,13 +1533,22 @@
 	const commitNodeResize = (resize: GraphNodeResize): void => {
 		optimisticSizes = {
 			...optimisticSizes,
-			[resize.nodeId]: resize.size
+			[resize.nodeId]: resize.mode === 'custom' ? resize.size : null
 		};
 		try {
 			void Promise.resolve(onNodeResize?.(resize)).catch(() => clearOptimisticResize(resize));
 		} catch {
 			clearOptimisticResize(resize);
 		}
+	};
+
+	const resetNodeSize = (event: MouseEvent, node: GraphNode): void => {
+		event.preventDefault();
+		event.stopPropagation();
+		if (!node.resizable) {
+			return;
+		}
+		commitNodeResize({ nodeId: node.id, mode: 'automatic' });
 	};
 
 	const clearOptimisticRename = (nodeId: string, label: string): void => {
@@ -1642,6 +1694,7 @@
 			if (size) {
 				commitNodeResize({
 					nodeId: nodeResizeGesture.nodeId,
+					mode: 'custom',
 					size
 				});
 			}
@@ -1830,8 +1883,8 @@
 					class:invalid={node.invalid}
 					class:draft-target={connectionDraft?.snapNodeId === node.id}
 					class="node"
-					style:left={`${node.x}rem`}
-					style:top={`${node.y}rem`}
+					style:left={`${node.position.x}rem`}
+					style:top={`${node.position.y}rem`}
 					style:width={`${nodeWidth(node)}rem`}
 					style:height={`${nodeHeight(node)}rem`}
 					style:--node-accent={node.color ?? 'var(--ga-outline)'}
@@ -2021,8 +2074,9 @@
 							type="button"
 							class="resize-handle"
 							aria-label={`Resize ${node.label}`}
-							title={`Resize ${node.label}`}
-							onpointerdown={(event) => startNodeResize(event, node)}></button>
+							title={`Resize ${node.label}; double-click for automatic size`}
+							onpointerdown={(event) => startNodeResize(event, node)}
+							ondblclick={(event) => resetNodeSize(event, node)}></button>
 					{/if}
 				</article>
 			{/each}
@@ -2173,6 +2227,7 @@
 		color: var(--gc-color-text, #e8edf6);
 		overflow: hidden;
 		transition:
+			width 0.18s cubic-bezier(0.2, 0, 0.13, 1),
 			height 0.18s cubic-bezier(0.2, 0, 0.13, 1),
 			border-color 0.1s ease,
 			box-shadow 0.1s ease;

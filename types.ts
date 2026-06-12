@@ -14,6 +14,16 @@ export interface GraphSocket {
 	color?: string;
 }
 
+export interface GraphNodePosition {
+	x: number;
+	y: number;
+}
+
+export interface GraphNodeSize {
+	width: number;
+	height: number;
+}
+
 export interface GraphNode {
 	id: string;
 	label: string;
@@ -23,10 +33,9 @@ export interface GraphNode {
 	collapsed?: boolean;
 	color?: string;
 	socketPlacement?: 'body' | 'header';
-	x: number;
-	y: number;
-	width?: number;
-	height?: number;
+	position: GraphNodePosition;
+	size?: GraphNodeSize;
+	automaticSize?: GraphNodeSize;
 	resizable?: boolean;
 	inputs: GraphSocket[];
 	outputs: GraphSocket[];
@@ -54,25 +63,14 @@ export interface GraphConnectionRequest {
 	to: GraphSocketRef;
 }
 
-export interface GraphNodePosition {
-	x: number;
-	y: number;
-}
-
 export interface GraphNodeMove {
 	nodeId: string;
 	position: GraphNodePosition;
 }
 
-export interface GraphNodeSize {
-	width: number;
-	height: number;
-}
-
-export interface GraphNodeResize {
-	nodeId: string;
-	size: GraphNodeSize;
-}
+export type GraphNodeResize =
+	| { nodeId: string; mode: 'custom'; size: GraphNodeSize }
+	| { nodeId: string; mode: 'automatic' };
 
 export interface GraphNodeCreationRequest {
 	position: GraphNodePosition;
