@@ -171,6 +171,7 @@
 	let optimisticSizes = $state<Record<string, GraphNodeSize | null>>({});
 	let optimisticLabels = $state<Record<string, string>>({});
 	let optimisticCollapsed = $state<Record<string, boolean>>({});
+	let expandedSockets = $state<Record<string, boolean>>({});
 	let renamingNodeId: string | null = $state(null);
 	let renameDraft = $state('');
 	let renameInput: HTMLInputElement | null = $state(null);
@@ -363,19 +364,85 @@
 
 	const socketStart = (node: GraphNode): number => nodeHeaderHeight(node) + 0.25 + NODE_BORDER_REM;
 
-	const allNodeSockets = (node: GraphNode, direction: GraphSocketDirection): GraphSocket[] =>
+	const rootNodeSockets = (node: GraphNode, direction: GraphSocketDirection): GraphSocket[] =>
 		direction === 'input' ? [...node.inputs, ...(node.headerInputs ?? [])] : node.outputs;
+
+	const flattenSockets = (sockets: readonly GraphSocket[]): GraphSocket[] =>
+		sockets.flatMap((socket) => [socket, ...flattenSockets(socket.children ?? [])]);
+
+	const allNodeSockets = (node: GraphNode, direction: GraphSocketDirection): GraphSocket[] =>
+		flattenSockets(rootNodeSockets(node, direction));
+
+	const socketRefKey = (nodeId: string, socketId: string): string => `${nodeId}:${socketId}`;
+
+	const socketExpansionKey = (
+		node: GraphNode,
+		socket: GraphSocket,
+		direction: GraphSocketDirection
+	): string => `${node.id}:${direction}:${socket.id}`;
+
+	const hasSocketConnection = (node: GraphNode, socketId: string): boolean =>
+		connectedSockets.has(socketRefKey(node.id, socketId));
+
+	const socketHasConnectedChild = (node: GraphNode, socket: GraphSocket): boolean =>
+		(socket.children ?? []).some((child) => hasSocketConnection(node, child.id));
+
+	const socketExpanded = (
+		node: GraphNode,
+		socket: GraphSocket,
+		direction: GraphSocketDirection
+	): boolean =>
+		(socket.children?.length ?? 0) > 0 &&
+		(socketHasConnectedChild(node, socket) ||
+			expandedSockets[socketExpansionKey(node, socket, direction)] === true);
+
+	const displaySockets = (
+		node: GraphNode,
+		direction: GraphSocketDirection,
+		sockets: readonly GraphSocket[]
+	): GraphSocket[] =>
+		sockets.flatMap((socket) =>
+			socketExpanded(node, socket, direction) ? [socket, ...(socket.children ?? [])] : [socket]
+		);
+
+	const displayNodeSockets = (node: GraphNode, direction: GraphSocketDirection): GraphSocket[] =>
+		direction === 'input'
+			? [...displaySockets(node, 'input', node.inputs), ...(node.headerInputs ?? [])]
+			: displaySockets(node, 'output', node.outputs);
+
+	const socketDisabled = (
+		node: GraphNode,
+		socket: GraphSocket,
+		direction: GraphSocketDirection
+	): boolean => {
+		if (socket.compatible === false) return true;
+		if (direction === 'output') return false;
+		if (socket.parentId) return hasSocketConnection(node, socket.parentId);
+		return socketHasConnectedChild(node, socket);
+	};
+
+	const toggleSocketExpanded = (
+		event: MouseEvent,
+		node: GraphNode,
+		socket: GraphSocket,
+		direction: GraphSocketDirection
+	): void => {
+		event.preventDefault();
+		event.stopPropagation();
+		const key = socketExpansionKey(node, socket, direction);
+		expandedSockets = { ...expandedSockets, [key]: !socketExpanded(node, socket, direction) };
+	};
 
 	const firstCollapsedSocket = (
 		node: GraphNode,
 		direction: GraphSocketDirection
 	): GraphSocket | null => {
-		const sockets = allNodeSockets(node, direction);
+		const sockets = rootNodeSockets(node, direction);
 		return sockets.find((socket) => socket.compatible !== false) ?? sockets[0] ?? null;
 	};
 
 	const collapsedSocketLabel = (node: GraphNode, direction: GraphSocketDirection): string => {
-		const sockets = allNodeSockets(node, direction);
+		const sockets = rootNodeSockets(node, direction);
 		if (sockets.length === 1) {
 			return sockets[0].label;
 		}
@@ -383,7 +450,7 @@
 	};
 
 	const collapsedSocketTitle = (node: GraphNode, direction: GraphSocketDirection): string => {
-		const sockets = allNodeSockets(node, direction);
+		const sockets = rootNodeSockets(node, direction);
 		if (sockets.length === 1) {
 			return sockets[0].valueType ?? sockets[0].label;
 		}
@@ -410,7 +477,14 @@
 						nodeHeaderHeight(node) +
 							NODE_BORDER_REM * 2 +
 							1.4 +
-							Math.max(node.inputs.length, node.outputs.length, 1) * SOCKET_ROW_REM
+							Math.max(
+								displayNodeSockets(node, 'input').filter(
+									(socket) => !node.headerInputs?.includes(socket)
+								).length,
+								displayNodeSockets(node, 'output').length,
+								1
+							) *
+								SOCKET_ROW_REM
 					);
 
 	const nodeHeight = (node: GraphNode): number =>
@@ -500,7 +574,7 @@
 		socketId: string,
 		direction: GraphSocketDirection
 	): number => {
-		const sockets = direction === 'input' ? node.inputs : node.outputs;
+		const sockets = displayNodeSockets(node, direction);
 		return Math.max(
 			0,
 			sockets.findIndex((socket) => socket.id === socketId)
@@ -933,6 +1007,15 @@
 		return path;
 	};
 
+	const edgeUsesGradient = (edge: GraphEdge): boolean =>
+		edge.color !== undefined && edge.targetColor !== undefined && edge.color !== edge.targetColor;
+
+	const edgeGradientId = (edge: GraphEdge, index: number): string =>
+		`edge-gradient-${(edge.id ?? `${edge.from.nodeId}-${edge.from.socketId}-${edge.to.nodeId}-${edge.to.socketId}-${index}`).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+
+	const edgeStroke = (edge: GraphEdge, gradientId: string): string | undefined =>
+		edgeUsesGradient(edge) ? `url(#${gradientId})` : edge.color;
+
 	const draftPath = (): string | null => {
 		if (!connectionDraft) {
 			return null;
@@ -1308,7 +1391,8 @@
 	};
 
 	const startConnection = (event: PointerEvent, nodeId: string, socket: GraphSocket): void => {
-		if (event.button !== 0 || socket.compatible === false) {
+		const node = nodesById.get(nodeId);
+		if (event.button !== 0 || !node || socketDisabled(node, socket, 'output')) {
 			return;
 		}
 		event.stopPropagation();
@@ -1326,7 +1410,8 @@
 	};
 
 	const completeConnection = (nodeId: string, socket: GraphSocket): boolean => {
-		if (!connectionDraft || socket.compatible === false) {
+		const node = nodesById.get(nodeId);
+		if (!connectionDraft || !node || socketDisabled(node, socket, 'input')) {
 			return false;
 		}
 		onConnect?.({
@@ -1347,8 +1432,7 @@
 		node: GraphNode | undefined,
 		socketId: string
 	): GraphSocket | undefined =>
-		node?.inputs.find((c) => c.id === socketId) ??
-		node?.headerInputs?.find((c) => c.id === socketId);
+		node ? allNodeSockets(node, 'input').find((socket) => socket.id === socketId) : undefined;
 
 	const finishConnectionAtPointer = (event: PointerEvent): void => {
 		if (connectionDraft?.snapNodeId && connectionDraft?.snapSocketId) {
@@ -1440,8 +1524,8 @@
 			for (const node of effectiveNodes) {
 				if (node.id === connectionDraft.from.nodeId) continue;
 
-				for (const socket of [...node.inputs, ...(node.headerInputs ?? [])]) {
-					if (socket.compatible === false) continue;
+				for (const socket of displayNodeSockets(node, 'input')) {
+					if (socketDisabled(node, socket, 'input')) continue;
 					const pt = socketPoint({ nodeId: node.id, socketId: socket.id }, 'input');
 					if (!pt) continue;
 
@@ -1454,7 +1538,7 @@
 				}
 
 				// Snap to node header if close to the node bounds and it has exactly one compatible input
-				if (node.inputs.length === 1 && node.inputs[0].compatible !== false) {
+				if (node.inputs.length === 1 && !socketDisabled(node, node.inputs[0], 'input')) {
 					const left = node.position.x * remPx;
 					const top = node.position.y * remPx;
 					const right = left + nodeWidth(node) * remPx;
@@ -1854,7 +1938,24 @@
 			<svg class="wires" aria-label="Graph connections">
 				{#each visibleEdges as edge, index (`${edge.id ?? index}:${edge.from.nodeId}:${edge.to.nodeId}`)}
 					{@const path = edgePath(edge)}
+					{@const start = socketPoint(edge.from, 'output')}
+					{@const end = socketPoint(edge.to, 'input')}
+					{@const gradientId = edgeGradientId(edge, index)}
 					{#if path}
+						{#if start && end && edgeUsesGradient(edge)}
+							<defs>
+								<linearGradient
+									id={gradientId}
+									gradientUnits="userSpaceOnUse"
+									x1={start.x}
+									y1={start.y}
+									x2={end.x}
+									y2={end.y}>
+									<stop offset="0%" stop-color={edge.color} />
+									<stop offset="100%" stop-color={edge.targetColor} />
+								</linearGradient>
+							</defs>
+						{/if}
 						<path
 							d={path}
 							class="edge-hit"
@@ -1871,7 +1972,7 @@
 							class:active={edge.active}
 							class:invalid={edge.invalid}
 							class:selected={edge.id !== undefined && selectedEdgeIdSet.has(edge.id)}
-							style:--edge-color={edge.color}
+							style:--edge-color={edgeStroke(edge, gradientId)}
 							vector-effect="non-scaling-stroke" />
 					{/if}
 				{/each}
@@ -2033,37 +2134,72 @@
 							{#if node.socketPlacement !== 'header'}
 								<div class="socket-columns">
 									<div class="socket-list inputs">
-										{#each node.inputs as socket (socket.id)}
-											<button
-												type="button"
-												class:incompatible={socket.compatible === false}
-												class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
-												class:draft-target={connectionDraft?.snapNodeId === node.id &&
-													connectionDraft?.snapSocketId === socket.id}
-												class="socket input"
-												data-node-id={node.id}
-												data-socket-id={socket.id}
-												title={socket.valueType ?? socket.label}
-												onpointerup={(event) => finishConnection(event, node.id, socket)}>
-												<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}
-												></span>
-												<span>{socket.label}</span>
-											</button>
+										{#each displaySockets(node, 'input', node.inputs) as socket (socket.id)}
+											<div class="socket-row input" class:component={socket.parentId}>
+												{#if socket.children && socket.children.length > 0}
+													<button
+														type="button"
+														class="socket-expander"
+														aria-label={`${socketExpanded(node, socket, 'input') ? 'Collapse' : 'Expand'} ${socket.label}`}
+														title={`${socketExpanded(node, socket, 'input') ? 'Collapse' : 'Expand'} ${socket.label}`}
+														onclick={(event) => toggleSocketExpanded(event, node, socket, 'input')}>
+														{socketExpanded(node, socket, 'input') ? 'v' : '>'}
+													</button>
+												{:else}
+													<span class="socket-expander-spacer"></span>
+												{/if}
+												<button
+													type="button"
+													disabled={socketDisabled(node, socket, 'input')}
+													class:incompatible={socketDisabled(node, socket, 'input')}
+													class:connected={hasSocketConnection(node, socket.id)}
+													class:draft-target={connectionDraft?.snapNodeId === node.id &&
+														connectionDraft?.snapSocketId === socket.id}
+													class:component={socket.parentId}
+													class="socket input"
+													data-node-id={node.id}
+													data-socket-id={socket.id}
+													title={socket.valueType ?? socket.label}
+													onpointerup={(event) => finishConnection(event, node.id, socket)}>
+													<span
+														class="pin"
+														style:--socket-color={socket.color ?? 'var(--ga-socket)'}></span>
+													<span>{socket.label}</span>
+												</button>
+											</div>
 										{/each}
 									</div>
 									<div class="socket-list outputs">
-										{#each node.outputs as socket (socket.id)}
-											<button
-												type="button"
-												class:incompatible={socket.compatible === false}
-												class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
-												class="socket output"
-												title={socket.valueType ?? socket.label}
-												onpointerdown={(event) => startConnection(event, node.id, socket)}>
-												<span>{socket.label}</span>
-												<span class="pin" style:--socket-color={socket.color ?? 'var(--ga-socket)'}
-												></span>
-											</button>
+										{#each displaySockets(node, 'output', node.outputs) as socket (socket.id)}
+											<div class="socket-row output" class:component={socket.parentId}>
+												<button
+													type="button"
+													disabled={socketDisabled(node, socket, 'output')}
+													class:incompatible={socketDisabled(node, socket, 'output')}
+													class:connected={hasSocketConnection(node, socket.id)}
+													class:component={socket.parentId}
+													class="socket output"
+													title={socket.valueType ?? socket.label}
+													onpointerdown={(event) => startConnection(event, node.id, socket)}>
+													<span>{socket.label}</span>
+													<span
+														class="pin"
+														style:--socket-color={socket.color ?? 'var(--ga-socket)'}></span>
+												</button>
+												{#if socket.children && socket.children.length > 0}
+													<button
+														type="button"
+														class="socket-expander"
+														aria-label={`${socketExpanded(node, socket, 'output') ? 'Collapse' : 'Expand'} ${socket.label}`}
+														title={`${socketExpanded(node, socket, 'output') ? 'Collapse' : 'Expand'} ${socket.label}`}
+														onclick={(event) =>
+															toggleSocketExpanded(event, node, socket, 'output')}>
+														{socketExpanded(node, socket, 'output') ? 'v' : '<'}
+													</button>
+												{:else}
+													<span class="socket-expander-spacer"></span>
+												{/if}
+											</div>
 										{/each}
 									</div>
 								</div>
@@ -2410,6 +2546,56 @@
 		gap: 0;
 	}
 
+	.socket-row {
+		display: flex;
+		align-items: center;
+		block-size: 1.45rem;
+		min-inline-size: 0;
+	}
+
+	.socket-row.input {
+		justify-content: flex-start;
+	}
+
+	.socket-row.output {
+		justify-content: flex-end;
+	}
+
+	.socket-row.component {
+		opacity: 0.9;
+	}
+
+	.socket-row.input.component {
+		padding-inline-start: 0.45rem;
+	}
+
+	.socket-row.output.component {
+		padding-inline-end: 0.45rem;
+	}
+
+	.socket-expander,
+	.socket-expander-spacer {
+		flex: 0 0 0.85rem;
+		inline-size: 0.85rem;
+		block-size: 100%;
+	}
+
+	.socket-expander {
+		display: inline-grid;
+		place-items: center;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: color-mix(in srgb, var(--gc-color-text, #e8edf6) 58%, transparent);
+		font: inherit;
+		font-size: 0.58rem;
+		cursor: pointer;
+	}
+
+	.socket-expander:hover {
+		color: var(--gc-color-text, #e8edf6);
+	}
+
 	.socket {
 		position: relative;
 		display: flex;
@@ -2424,6 +2610,11 @@
 		font: inherit;
 		font-size: 0.68rem;
 		cursor: crosshair;
+	}
+
+	.socket-row .socket {
+		flex: 1 1 auto;
+		block-size: 100%;
 	}
 
 	.socket-columns .socket.input {
@@ -2456,6 +2647,10 @@
 	.socket.incompatible {
 		opacity: 0.34;
 		cursor: not-allowed;
+	}
+
+	.socket.component {
+		font-size: 0.62rem;
 	}
 
 	.pin {

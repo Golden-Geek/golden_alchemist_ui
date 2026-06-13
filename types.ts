@@ -12,6 +12,9 @@ export interface GraphSocket {
 	valueType?: string;
 	compatible?: boolean;
 	color?: string;
+	parentId?: string;
+	component?: string;
+	children?: GraphSocket[];
 }
 
 export interface GraphNodePosition {
@@ -54,6 +57,7 @@ export interface GraphEdge {
 	from: GraphSocketRef;
 	to: GraphSocketRef;
 	color?: string;
+	targetColor?: string;
 	active?: boolean;
 	invalid?: boolean;
 }
