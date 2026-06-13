@@ -87,6 +87,7 @@
 		onNodeCollapsedChange,
 		onConnect,
 		nodeContent,
+		nodeHeaderContent,
 		toolbarEnd,
 		onBackgroundContextMenu,
 		onCreateRequest,
@@ -109,6 +110,7 @@
 		onNodeCollapsedChange?: (nodeId: string, collapsed: boolean) => void | Promise<void>;
 		onConnect?: (connection: GraphConnectionRequest) => void;
 		nodeContent?: Snippet<[GraphNode]>;
+		nodeHeaderContent?: Snippet<[GraphNode]>;
 		toolbarEnd?: Snippet;
 		onBackgroundContextMenu?: (event: MouseEvent, position: GraphNodePosition) => void;
 		onCreateRequest?: (request: GraphNodeCreationRequest) => void;
@@ -2098,6 +2100,11 @@
 								{/if}
 							</div>
 						{/if}
+						{#if nodeHeaderContent && node.collapsed !== true}
+							<div class="node-header-content" data-no-node-select>
+								{@render nodeHeaderContent(node)}
+							</div>
+						{/if}
 						{#if node.collapsed === true && firstCollapsedSocket(node, 'output')}
 							{@const socket = firstCollapsedSocket(node, 'output') as GraphSocket}
 							<div class="header-socket-list outputs collapsed-sockets">
@@ -2519,6 +2526,14 @@
 		font-size: 0.64rem;
 	}
 
+	.node-header-content {
+		display: flex;
+		flex: 0 1 auto;
+		align-items: center;
+		min-inline-size: 0;
+		max-inline-size: 45%;
+	}
+
 	.collapsed-socket {
 		min-inline-size: 1.75rem;
 		justify-content: center;
@@ -2615,20 +2630,20 @@
 	}
 
 	.socket-row .socket {
-		flex: 1 1 auto;
+		/* flex: 1 1 auto; */
 		block-size: 100%;
 	}
 
 	.socket-columns .socket.input {
 		justify-content: flex-start;
-		padding-inline-start: 0.12rem;
-		padding-inline-end: 0.35rem;
+		/*padding-inline-start: 0.12rem;
+		padding-inline-end: 0.35rem;/*
 	}
 
 	.socket-columns .socket.output {
 		justify-content: flex-end;
-		padding-inline-start: 0.35rem;
-		padding-inline-end: 0.12rem;
+		/*padding-inline-start: 0.35rem;
+		padding-inline-end: 0.12rem;*/
 	}
 
 	.socket span:not(.pin) {
