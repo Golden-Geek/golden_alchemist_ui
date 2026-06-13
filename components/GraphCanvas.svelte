@@ -87,6 +87,7 @@
 		onNodeCollapsedChange,
 		onConnect,
 		nodeContent,
+		toolbarEnd,
 		onBackgroundContextMenu,
 		onCreateRequest,
 		routeEdgesAroundNodes = false,
@@ -107,6 +108,7 @@
 		onNodeCollapsedChange?: (nodeId: string, collapsed: boolean) => void | Promise<void>;
 		onConnect?: (connection: GraphConnectionRequest) => void;
 		nodeContent?: Snippet<[GraphNode]>;
+		toolbarEnd?: Snippet;
 		onBackgroundContextMenu?: (event: MouseEvent, position: GraphNodePosition) => void;
 		onCreateRequest?: (request: GraphNodeCreationRequest) => void;
 		routeEdgesAroundNodes?: boolean;
@@ -1841,6 +1843,10 @@
 				{Math.round(camera.zoom * 100)}%
 			</button>
 		</div>
+		{#if toolbarEnd}
+			<span class="toolbar-divider" aria-hidden="true"></span>
+			{@render toolbarEnd()}
+		{/if}
 	</div>
 
 	<div class="world-pan" style:transform={panStyle}>
@@ -2608,6 +2614,15 @@
 		min-inline-size: 3.15rem;
 		padding-inline: 0.4rem;
 		font-variant-numeric: tabular-nums;
+	}
+
+	.toolbar-divider {
+		display: inline-block;
+		inline-size: 0.06rem;
+		block-size: 1rem;
+		background: color-mix(in srgb, var(--ga-outline) 55%, transparent);
+		margin-inline: 0.1rem;
+		align-self: center;
 	}
 
 	.empty {
