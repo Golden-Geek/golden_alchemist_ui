@@ -94,6 +94,7 @@
 		socketLabels = 'hover',
 		initialCamera,
 		onCameraChange,
+		autoHomeOnMount = true,
 		emptyLabel = 'No nodes in this graph.'
 	}: {
 		nodes: GraphNode[];
@@ -115,6 +116,7 @@
 		socketLabels?: 'always' | 'hover' | 'never';
 		initialCamera?: GraphCamera;
 		onCameraChange?: (camera: GraphCamera) => void;
+		autoHomeOnMount?: boolean;
 		emptyLabel?: string;
 	} = $props();
 
@@ -1864,7 +1866,7 @@
 			viewportHeight = Math.max(1, entry.contentRect.height);
 		});
 		observer.observe(container);
-		if (!initialCamera) {
+		if (autoHomeOnMount && !initialCamera) {
 			requestAnimationFrame(() => home());
 		}
 		return () => {
@@ -2136,18 +2138,6 @@
 									<div class="socket-list inputs">
 										{#each displaySockets(node, 'input', node.inputs) as socket (socket.id)}
 											<div class="socket-row input" class:component={socket.parentId}>
-												{#if socket.children && socket.children.length > 0}
-													<button
-														type="button"
-														class="socket-expander"
-														aria-label={`${socketExpanded(node, socket, 'input') ? 'Collapse' : 'Expand'} ${socket.label}`}
-														title={`${socketExpanded(node, socket, 'input') ? 'Collapse' : 'Expand'} ${socket.label}`}
-														onclick={(event) => toggleSocketExpanded(event, node, socket, 'input')}>
-														{socketExpanded(node, socket, 'input') ? 'v' : '>'}
-													</button>
-												{:else}
-													<span class="socket-expander-spacer"></span>
-												{/if}
 												<button
 													type="button"
 													disabled={socketDisabled(node, socket, 'input')}
@@ -2166,12 +2156,37 @@
 														style:--socket-color={socket.color ?? 'var(--ga-socket)'}></span>
 													<span>{socket.label}</span>
 												</button>
+												{#if socket.children && socket.children.length > 0}
+													<button
+														type="button"
+														class="socket-expander"
+														aria-label={`${socketExpanded(node, socket, 'input') ? 'Collapse' : 'Expand'} ${socket.label}`}
+														title={`${socketExpanded(node, socket, 'input') ? 'Collapse' : 'Expand'} ${socket.label}`}
+														onclick={(event) => toggleSocketExpanded(event, node, socket, 'input')}>
+														{socketExpanded(node, socket, 'input') ? 'v' : '>'}
+													</button>
+												{:else}
+													<span class="socket-expander-spacer"></span>
+												{/if}
 											</div>
 										{/each}
 									</div>
 									<div class="socket-list outputs">
 										{#each displaySockets(node, 'output', node.outputs) as socket (socket.id)}
 											<div class="socket-row output" class:component={socket.parentId}>
+												{#if socket.children && socket.children.length > 0}
+													<button
+														type="button"
+														class="socket-expander"
+														aria-label={`${socketExpanded(node, socket, 'output') ? 'Collapse' : 'Expand'} ${socket.label}`}
+														title={`${socketExpanded(node, socket, 'output') ? 'Collapse' : 'Expand'} ${socket.label}`}
+														onclick={(event) =>
+															toggleSocketExpanded(event, node, socket, 'output')}>
+														{socketExpanded(node, socket, 'output') ? 'v' : '<'}
+													</button>
+												{:else}
+													<span class="socket-expander-spacer"></span>
+												{/if}
 												<button
 													type="button"
 													disabled={socketDisabled(node, socket, 'output')}
@@ -2186,19 +2201,6 @@
 														class="pin"
 														style:--socket-color={socket.color ?? 'var(--ga-socket)'}></span>
 												</button>
-												{#if socket.children && socket.children.length > 0}
-													<button
-														type="button"
-														class="socket-expander"
-														aria-label={`${socketExpanded(node, socket, 'output') ? 'Collapse' : 'Expand'} ${socket.label}`}
-														title={`${socketExpanded(node, socket, 'output') ? 'Collapse' : 'Expand'} ${socket.label}`}
-														onclick={(event) =>
-															toggleSocketExpanded(event, node, socket, 'output')}>
-														{socketExpanded(node, socket, 'output') ? 'v' : '<'}
-													</button>
-												{:else}
-													<span class="socket-expander-spacer"></span>
-												{/if}
 											</div>
 										{/each}
 									</div>
@@ -2566,11 +2568,11 @@
 	}
 
 	.socket-row.input.component {
-		padding-inline-start: 0.45rem;
+		padding-inline-end: 0.45rem;
 	}
 
 	.socket-row.output.component {
-		padding-inline-end: 0.45rem;
+		padding-inline-start: 0.45rem;
 	}
 
 	.socket-expander,
@@ -2619,10 +2621,14 @@
 
 	.socket-columns .socket.input {
 		justify-content: flex-start;
+		padding-inline-start: 0.12rem;
+		padding-inline-end: 0.35rem;
 	}
 
 	.socket-columns .socket.output {
 		justify-content: flex-end;
+		padding-inline-start: 0.35rem;
+		padding-inline-end: 0.12rem;
 	}
 
 	.socket span:not(.pin) {
