@@ -12,6 +12,7 @@ export interface GraphSocket {
 	valueType?: string;
 	compatible?: boolean;
 	color?: string;
+	defaultParamId?: string;
 	parentId?: string;
 	component?: string;
 	children?: GraphSocket[];
@@ -45,6 +46,7 @@ export interface GraphNode {
 	headerInputs?: GraphSocket[];
 	active?: boolean;
 	invalid?: boolean;
+	warning?: string;
 }
 
 export interface GraphSocketRef {

@@ -86,8 +86,10 @@
 		onNodeRename,
 		onNodeCollapsedChange,
 		onConnect,
+		canConnect,
 		nodeContent,
 		nodeHeaderContent,
+		inputSocketContent,
 		toolbarEnd,
 		onBackgroundContextMenu,
 		onCreateRequest,
@@ -109,8 +111,10 @@
 		onNodeRename?: (nodeId: string, label: string) => void | Promise<void>;
 		onNodeCollapsedChange?: (nodeId: string, collapsed: boolean) => void | Promise<void>;
 		onConnect?: (connection: GraphConnectionRequest) => void;
+		canConnect?: (connection: GraphConnectionRequest) => boolean;
 		nodeContent?: Snippet<[GraphNode]>;
 		nodeHeaderContent?: Snippet<[GraphNode]>;
+		inputSocketContent?: Snippet<[GraphNode, GraphSocket]>;
 		toolbarEnd?: Snippet;
 		onBackgroundContextMenu?: (event: MouseEvent, position: GraphNodePosition) => void;
 		onCreateRequest?: (request: GraphNodeCreationRequest) => void;
@@ -414,6 +418,9 @@
 			? [...displaySockets(node, 'input', node.inputs), ...(node.headerInputs ?? [])]
 			: displaySockets(node, 'output', node.outputs);
 
+	const connectionAllowed = (connection: GraphConnectionRequest): boolean =>
+		canConnect?.(connection) ?? true;
+
 	const socketDisabled = (
 		node: GraphNode,
 		socket: GraphSocket,
@@ -421,9 +428,23 @@
 	): boolean => {
 		if (socket.compatible === false) return true;
 		if (direction === 'output') return false;
-		if (socket.parentId) return hasSocketConnection(node, socket.parentId);
-		return socketHasConnectedChild(node, socket);
+		if (socket.parentId && hasSocketConnection(node, socket.parentId)) return true;
+		if (!socket.parentId && socketHasConnectedChild(node, socket)) return true;
+		if (connectionDraft) {
+			return !connectionAllowed({
+				from: connectionDraft.from,
+				to: { nodeId: node.id, socketId: socket.id }
+			});
+		}
+		return false;
 	};
+
+	const inputSocketContentVisible = (node: GraphNode, socket: GraphSocket): boolean =>
+		Boolean(inputSocketContent) &&
+		Boolean(socket.defaultParamId) &&
+		!socket.parentId &&
+		!hasSocketConnection(node, socket.id) &&
+		!socketHasConnectedChild(node, socket);
 
 	const toggleSocketExpanded = (
 		event: MouseEvent,
@@ -1418,10 +1439,14 @@
 		if (!connectionDraft || !node || socketDisabled(node, socket, 'input')) {
 			return false;
 		}
-		onConnect?.({
+		const connection = {
 			from: connectionDraft.from,
 			to: { nodeId, socketId: socket.id }
-		});
+		};
+		if (!connectionAllowed(connection)) {
+			return false;
+		}
+		onConnect?.(connection);
 		connectionDraft = null;
 		return true;
 	};
@@ -2005,11 +2030,12 @@
 						{#if node.collapsed === true && firstCollapsedSocket(node, 'input')}
 							{@const socket = firstCollapsedSocket(node, 'input') as GraphSocket}
 							<div class="header-socket-list inputs collapsed-sockets">
-								<button
-									type="button"
-									class:incompatible={socket.compatible === false}
-									class:connected={collapsedSocketConnected(node, 'input')}
-									class:draft-target={collapsedSocketDraftTarget(node, 'input')}
+						<button
+							type="button"
+							disabled={socketDisabled(node, socket, 'input')}
+							class:incompatible={socketDisabled(node, socket, 'input')}
+							class:connected={collapsedSocketConnected(node, 'input')}
+							class:draft-target={collapsedSocketDraftTarget(node, 'input')}
 									class="socket header-socket input collapsed-socket"
 									data-node-id={node.id}
 									data-socket-id={socket.id}
@@ -2023,10 +2049,11 @@
 						{:else if node.socketPlacement === 'header'}
 							<div class="header-socket-list inputs">
 								{#each node.inputs as socket (socket.id)}
-									<button
-										type="button"
-										class:incompatible={socket.compatible === false}
-										class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
+							<button
+								type="button"
+								disabled={socketDisabled(node, socket, 'input')}
+								class:incompatible={socketDisabled(node, socket, 'input')}
+								class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
 										class:draft-target={connectionDraft?.snapNodeId === node.id &&
 											connectionDraft?.snapSocketId === socket.id}
 										class="socket header-socket input"
@@ -2043,10 +2070,11 @@
 						{:else if node.headerInputs && node.headerInputs.length > 0}
 							<div class="header-socket-list inputs header-inputs-extra">
 								{#each node.headerInputs as socket (socket.id)}
-									<button
-										type="button"
-										class:incompatible={socket.compatible === false}
-										class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
+							<button
+								type="button"
+								disabled={socketDisabled(node, socket, 'input')}
+								class:incompatible={socketDisabled(node, socket, 'input')}
+								class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
 										class:draft-target={connectionDraft?.snapNodeId === node.id &&
 											connectionDraft?.snapSocketId === socket.id}
 										class="socket header-socket input"
@@ -2099,6 +2127,9 @@
 									<small>{node.subtitle}</small>
 								{/if}
 							</div>
+						{/if}
+						{#if node.warning}
+							<span class="node-warning" title={node.warning} aria-label={node.warning}>!</span>
 						{/if}
 						{#if nodeHeaderContent && node.collapsed !== true}
 							<div class="node-header-content" data-no-node-select>
@@ -2172,11 +2203,20 @@
 														onclick={(event) => toggleSocketExpanded(event, node, socket, 'input')}>
 														{socketExpanded(node, socket, 'input') ? 'v' : '>'}
 													</button>
-												{:else}
-													<span class="socket-expander-spacer"></span>
-												{/if}
-											</div>
-										{/each}
+								{:else}
+									<span class="socket-expander-spacer"></span>
+								{/if}
+								{#if inputSocketContent && inputSocketContentVisible(node, socket)}
+									<div
+										class="socket-inline-content"
+										data-no-node-select
+										role="presentation"
+										onpointerdown={(event) => event.stopPropagation()}>
+										{@render inputSocketContent(node, socket)}
+									</div>
+								{/if}
+							</div>
+						{/each}
 									</div>
 									<div class="socket-list outputs">
 										{#each displaySockets(node, 'output', node.outputs) as socket (socket.id)}
@@ -2490,6 +2530,23 @@
 		outline: none;
 	}
 
+	.node-warning {
+		display: inline-grid;
+		flex: 0 0 1.05rem;
+		align-self: center;
+		place-items: center;
+		inline-size: 1.05rem;
+		block-size: 1.05rem;
+		margin-inline-end: 0.25rem;
+		border: 0.06rem solid color-mix(in srgb, var(--ga-error) 74%, transparent);
+		border-radius: 999rem;
+		background: color-mix(in srgb, var(--ga-error) 18%, transparent);
+		color: var(--ga-error);
+		font-size: 0.72rem;
+		font-weight: 800;
+		line-height: 1;
+	}
+
 	/* .node.active .node-header {
 		background: color-mix(in srgb, var(--ga-active) 22%, var(--ga-node));
 	} */
@@ -2549,7 +2606,8 @@
 
 	.socket-columns {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+		grid-template-columns: minmax(0, 1fr) max-content;
+		column-gap: 0.25rem;
 		align-content: start;
 		box-sizing: border-box;
 		flex: 0 0 auto;
@@ -2561,6 +2619,11 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0;
+		min-inline-size: 0;
+	}
+
+	.socket-list.outputs {
+		min-inline-size: max-content;
 	}
 
 	.socket-row {
@@ -2613,6 +2676,15 @@
 		color: var(--gc-color-text, #e8edf6);
 	}
 
+	.socket-inline-content {
+		display: flex;
+		flex: 1 1 8rem;
+		align-items: center;
+		min-inline-size: 4.5rem;
+		max-inline-size: 18rem;
+		margin-inline-end: 0.25rem;
+	}
+
 	.socket {
 		position: relative;
 		display: flex;
@@ -2630,25 +2702,25 @@
 	}
 
 	.socket-row .socket {
-		/* flex: 1 1 auto; */
+		flex: 0 0 auto;
 		block-size: 100%;
 	}
 
 	.socket-columns .socket.input {
 		justify-content: flex-start;
-		/*padding-inline-start: 0.12rem;
-		padding-inline-end: 0.35rem;/*
+		padding-inline-start: 0.12rem;
+		padding-inline-end: 0.35rem;
 	}
 
 	.socket-columns .socket.output {
 		justify-content: flex-end;
-		/*padding-inline-start: 0.35rem;
-		padding-inline-end: 0.12rem;*/
+		padding-inline-start: 0.35rem;
+		padding-inline-end: 0.12rem;
 	}
 
 	.socket span:not(.pin) {
-		overflow: hidden;
-		text-overflow: ellipsis;
+		overflow: visible;
+		text-overflow: clip;
 		white-space: nowrap;
 		transition: opacity 0.15s ease;
 	}
