@@ -520,11 +520,14 @@
 			case 'int':
 			case 'float':
 			case 'duration':
-				return 4.6;
+				return 8.8;
 			default:
 				return 5.4;
 		}
 	};
+
+	const socketDefaultColumnWidth = (sockets: readonly GraphSocket[]): number =>
+		sockets.reduce((width, socket) => Math.max(width, socketDefaultSlotWidth(socket)), 0);
 
 	const toggleSocketExpanded = (
 		event: MouseEvent,
@@ -2376,12 +2379,11 @@
 						<div class="node-body">
 							{#if node.socketPlacement !== 'header'}
 								<div class="socket-columns">
-									<div class="socket-list inputs">
+									<div
+										class="socket-list inputs"
+										style:--socket-default-width={`${socketDefaultColumnWidth(displaySockets(node, 'input', node.inputs))}rem`}>
 										{#each displaySockets(node, 'input', node.inputs) as socket (socket.id)}
-											<div
-												class="socket-row input"
-												class:component={socket.parentId}
-												style:--socket-default-width={`${socketDefaultSlotWidth(socket)}rem`}>
+											<div class="socket-row input" class:component={socket.parentId}>
 												<button
 													type="button"
 													disabled={socketDisabled(node, socket, 'input')}
@@ -2893,7 +2895,14 @@
 	}
 
 	.socket-list.inputs {
-		align-items: flex-start;
+		display: grid;
+		grid-template-columns: minmax(0, max-content) 0.85rem minmax(
+				0,
+				var(--socket-default-width, 0rem)
+			);
+		align-items: start;
+		justify-self: start;
+		max-inline-size: 100%;
 		overflow: hidden;
 	}
 
@@ -2910,12 +2919,10 @@
 
 	.socket-row.input {
 		display: grid;
-		grid-template-columns: minmax(0, max-content) 0.85rem minmax(
-				0,
-				var(--socket-default-width, 0rem)
-			);
+		grid-column: 1 / -1;
+		grid-template-columns: subgrid;
 		align-items: center;
-		inline-size: max-content;
+		inline-size: 100%;
 		max-inline-size: 100%;
 	}
 
@@ -2962,9 +2969,9 @@
 		display: flex;
 		align-items: center;
 		justify-content: stretch;
-		inline-size: var(--socket-default-width, auto);
+		inline-size: 100%;
 		min-inline-size: 0;
-		max-inline-size: min(var(--socket-default-width, 8.5rem), 100%);
+		max-inline-size: 100%;
 		overflow: hidden;
 	}
 
@@ -2992,6 +2999,7 @@
 	/* In grid/subgrid context (input rows), override flex-dependent sizing */
 	.socket-row.input .socket.input {
 		block-size: 1.35rem;
+		inline-size: 100%;
 		max-inline-size: 100%;
 	}
 
