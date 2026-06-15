@@ -5,6 +5,7 @@
 		GraphConnectionRequest,
 		GraphEdge,
 		GraphNode,
+		GraphNodeBypassConnection,
 		GraphNodeCreationRequest,
 		GraphNodeMove,
 		GraphNodePosition,
@@ -12,7 +13,8 @@
 		GraphNodeSize,
 		GraphSocket,
 		GraphSocketDirection,
-		GraphSocketRef
+		GraphSocketRef,
+		GraphViewportInset
 	} from '../types';
 
 	interface PanGesture {
@@ -85,6 +87,7 @@
 		onNodeResize,
 		onNodeRename,
 		onNodeCollapsedChange,
+		onNodeEnabledChange,
 		onConnect,
 		canConnect,
 		nodeContent,
@@ -97,6 +100,7 @@
 		socketLabels = 'hover',
 		initialCamera,
 		onCameraChange,
+		viewportInset = {},
 		autoHomeOnMount = true,
 		emptyLabel = 'No nodes in this graph.'
 	}: {
@@ -110,6 +114,7 @@
 		onNodeResize?: (resize: GraphNodeResize) => void | Promise<void>;
 		onNodeRename?: (nodeId: string, label: string) => void | Promise<void>;
 		onNodeCollapsedChange?: (nodeId: string, collapsed: boolean) => void | Promise<void>;
+		onNodeEnabledChange?: (nodeId: string, enabled: boolean) => void | Promise<void>;
 		onConnect?: (connection: GraphConnectionRequest) => void;
 		canConnect?: (connection: GraphConnectionRequest) => boolean;
 		nodeContent?: Snippet<[GraphNode]>;
@@ -122,6 +127,7 @@
 		socketLabels?: 'always' | 'hover' | 'never';
 		initialCamera?: GraphCamera;
 		onCameraChange?: (camera: GraphCamera) => void;
+		viewportInset?: GraphViewportInset;
 		autoHomeOnMount?: boolean;
 		emptyLabel?: string;
 	} = $props();
@@ -133,7 +139,7 @@
 	const MIN_NODE_WIDTH_REM = 8;
 	const NODE_BORDER_REM = 0.08;
 	const NODE_HEADER_REM = 1.8;
-	const SOCKET_ROW_REM = 1.45;
+	const SOCKET_ROW_REM = 1.35;
 	const HEADER_SOCKET_INSET_REM = 0.47;
 	const FRAME_PADDING_REM = 3;
 	const CAMERA_ANIMATION_MS = 240;
@@ -179,6 +185,7 @@
 	let optimisticSizes = $state<Record<string, GraphNodeSize | null>>({});
 	let optimisticLabels = $state<Record<string, string>>({});
 	let optimisticCollapsed = $state<Record<string, boolean>>({});
+	let optimisticEnabled = $state<Record<string, boolean>>({});
 	let expandedSockets = $state<Record<string, boolean>>({});
 	let renamingNodeId: string | null = $state(null);
 	let renameDraft = $state('');
@@ -197,16 +204,19 @@
 			const size = node.id in resizeSizes ? resizeSizes[node.id] : optimisticSizes[node.id];
 			const label = optimisticLabels[node.id];
 			const collapsed = optimisticCollapsed[node.id];
+			const enabled = optimisticEnabled[node.id];
 			return position !== undefined ||
 				size !== undefined ||
 				label !== undefined ||
-				collapsed !== undefined
+				collapsed !== undefined ||
+				enabled !== undefined
 				? {
 						...node,
 						...(position !== undefined ? { position } : {}),
 						...(size !== undefined ? { size: size ?? undefined } : {}),
 						...(label !== undefined ? { label } : {}),
-						...(collapsed !== undefined ? { collapsed } : {})
+						...(collapsed !== undefined ? { collapsed } : {}),
+						...(enabled !== undefined ? { enabled } : {})
 					}
 				: node;
 		})
@@ -304,6 +314,22 @@
 	});
 
 	$effect(() => {
+		let next = optimisticEnabled;
+		const enabledById = new Map(nodes.map((node) => [node.id, node.enabled !== false]));
+		for (const [nodeId, enabled] of Object.entries(optimisticEnabled)) {
+			if (enabledById.get(nodeId) === enabled || !enabledById.has(nodeId)) {
+				if (next === optimisticEnabled) {
+					next = { ...optimisticEnabled };
+				}
+				delete next[nodeId];
+			}
+		}
+		if (next !== optimisticEnabled) {
+			optimisticEnabled = next;
+		}
+	});
+
+	$effect(() => {
 		if (!renameInput || !renamingNodeId || focusedRenameNodeId === renamingNodeId) {
 			return;
 		}
@@ -316,6 +342,41 @@
 
 	const clamp = (value: number, minimum: number, maximum: number): number =>
 		Math.min(maximum, Math.max(minimum, value));
+
+	const normalizedViewportInset = (): Required<GraphViewportInset> => {
+		const left = Math.max(0, finiteNumber(viewportInset.left, 0));
+		const right = Math.max(0, finiteNumber(viewportInset.right, 0));
+		const top = Math.max(0, finiteNumber(viewportInset.top, 0));
+		const bottom = Math.max(0, finiteNumber(viewportInset.bottom, 0));
+		const horizontalScale = Math.min(1, viewportWidth / Math.max(1, left + right));
+		const verticalScale = Math.min(1, viewportHeight / Math.max(1, top + bottom));
+		return {
+			left: left * horizontalScale,
+			right: right * horizontalScale,
+			top: top * verticalScale,
+			bottom: bottom * verticalScale
+		};
+	};
+
+	const visibleViewport = (): { x: number; y: number; width: number; height: number } => {
+		const inset = normalizedViewportInset();
+		const width = Math.max(1, viewportWidth - inset.left - inset.right);
+		const height = Math.max(1, viewportHeight - inset.top - inset.bottom);
+		return {
+			x: inset.left,
+			y: inset.top,
+			width,
+			height
+		};
+	};
+
+	const visibleViewportCenter = (): GraphNodePosition => {
+		const viewport = visibleViewport();
+		return {
+			x: viewport.x + viewport.width * 0.5,
+			y: viewport.y + viewport.height * 0.5
+		};
+	};
 
 	const camerasMatch = (left: GraphCamera, right: GraphCamera): boolean =>
 		Math.abs(left.x - right.x) < 0.0001 &&
@@ -658,10 +719,66 @@
 		};
 	};
 
+	const localSocketPoint = (
+		node: GraphNode,
+		socketId: string,
+		direction: GraphSocketDirection
+	): { x: number; y: number } | null => {
+		if (
+			node.collapsed === true &&
+			allNodeSockets(node, direction).some((socket) => socket.id === socketId)
+		) {
+			return {
+				x:
+					direction === 'output'
+						? nodeWidth(node) - HEADER_SOCKET_INSET_REM
+						: HEADER_SOCKET_INSET_REM,
+				y: NODE_BORDER_REM + nodeHeaderHeight(node) * 0.5
+			};
+		}
+		if (node.socketPlacement === 'header') {
+			return {
+				x:
+					direction === 'output'
+						? nodeWidth(node) - HEADER_SOCKET_INSET_REM
+						: HEADER_SOCKET_INSET_REM,
+				y: NODE_BORDER_REM + nodeHeaderHeight(node) * 0.5
+			};
+		}
+		if (direction === 'input' && node.headerInputs) {
+			const headerIdx = node.headerInputs.findIndex((socket) => socket.id === socketId);
+			if (headerIdx >= 0) {
+				return {
+					x: HEADER_SOCKET_INSET_REM + headerIdx * SOCKET_ROW_REM * 0.8,
+					y: NODE_BORDER_REM + nodeHeaderHeight(node) * 0.5
+				};
+			}
+		}
+		return {
+			x: direction === 'output' ? nodeWidth(node) : 0,
+			y: socketStart(node) + (socketIndex(node, socketId, direction) + 0.5) * SOCKET_ROW_REM
+		};
+	};
+
 	const wirePath = (start: { x: number; y: number }, end: { x: number; y: number }): string => {
 		const horizontal = Math.abs(end.x - start.x);
 		const control = clamp(horizontal * 0.5, remPx * 2.5, remPx * 12);
 		return `M ${start.x} ${start.y} C ${start.x + control} ${start.y}, ${end.x - control} ${end.y}, ${end.x} ${end.y}`;
+	};
+
+	const localWirePath = (
+		start: { x: number; y: number },
+		end: { x: number; y: number }
+	): string => {
+		const horizontal = Math.abs(end.x - start.x);
+		const control = clamp(horizontal * 0.5, 1.2, 6);
+		return `M ${start.x} ${start.y} C ${start.x + control} ${start.y}, ${end.x - control} ${end.y}, ${end.x} ${end.y}`;
+	};
+
+	const nodeBypassPath = (node: GraphNode, bypass: GraphNodeBypassConnection): string | null => {
+		const start = localSocketPoint(node, bypass.inputSocketId, 'input');
+		const end = localSocketPoint(node, bypass.outputSocketId, 'output');
+		return start && end ? localWirePath(start, end) : null;
 	};
 
 	const routingPointBlocked = (x: number, y: number): boolean => {
@@ -1123,12 +1240,14 @@
 	};
 
 	const setZoom = (zoom: number): void => {
+		const center = visibleViewportCenter();
 		cancelCameraAnimation();
-		applyCamera(cameraAtZoom(zoom, viewportWidth * 0.5, viewportHeight * 0.5));
+		applyCamera(cameraAtZoom(zoom, center.x, center.y));
 	};
 
 	const resetZoom = (): void => {
-		animateCamera(cameraAtZoom(1, viewportWidth * 0.5, viewportHeight * 0.5));
+		const center = visibleViewportCenter();
+		animateCamera(cameraAtZoom(1, center.x, center.y));
 	};
 
 	const handleZoomInput = (event: Event): void => {
@@ -1146,19 +1265,24 @@
 		const widthPx = Math.max(remPx, (right - left) * remPx);
 		const heightPx = Math.max(remPx, (bottom - top) * remPx);
 		const paddingPx = FRAME_PADDING_REM * remPx;
+		const viewport = visibleViewport();
 		const zoom = clamp(
 			Math.min(
-				(viewportWidth - paddingPx * 2) / widthPx,
-				(viewportHeight - paddingPx * 2) / heightPx
+				(viewport.width - paddingPx * 2) / widthPx,
+				(viewport.height - paddingPx * 2) / heightPx
 			),
 			MIN_ZOOM,
 			MAX_ZOOM
 		);
 		const centerX = (left + right) * 0.5 * remPx;
 		const centerY = (top + bottom) * 0.5 * remPx;
+		const viewportCenter = {
+			x: viewport.x + viewport.width * 0.5,
+			y: viewport.y + viewport.height * 0.5
+		};
 		animateCamera({
-			x: viewportWidth * 0.5 - centerX * zoom,
-			y: viewportHeight * 0.5 - centerY * zoom,
+			x: viewportCenter.x - centerX * zoom,
+			y: viewportCenter.y - centerY * zoom,
 			zoom
 		});
 		return true;
@@ -1183,10 +1307,13 @@
 		};
 	};
 
-	export const viewportCenter = (): GraphNodePosition => ({
-		x: (viewportWidth * 0.5 - camera.x) / camera.zoom / remPx,
-		y: (viewportHeight * 0.5 - camera.y) / camera.zoom / remPx
-	});
+	export const viewportCenter = (): GraphNodePosition => {
+		const center = visibleViewportCenter();
+		return {
+			x: (center.x - camera.x) / camera.zoom / remPx,
+			y: (center.y - camera.y) / camera.zoom / remPx
+		};
+	};
 
 	const publishSelection = (nodeIds: string[], edgeIds: string[]): void => {
 		onGraphSelectionChange?.(nodeIds, edgeIds);
@@ -1684,6 +1811,15 @@
 		optimisticCollapsed = next;
 	};
 
+	const clearOptimisticEnabled = (nodeId: string, enabled: boolean): void => {
+		if (optimisticEnabled[nodeId] !== enabled) {
+			return;
+		}
+		const next = { ...optimisticEnabled };
+		delete next[nodeId];
+		optimisticEnabled = next;
+	};
+
 	const toggleNodeCollapsed = (node: GraphNode): void => {
 		const collapsed = node.collapsed !== true;
 		optimisticCollapsed = { ...optimisticCollapsed, [node.id]: collapsed };
@@ -1693,6 +1829,26 @@
 			);
 		} catch {
 			clearOptimisticCollapse(node.id, collapsed);
+		}
+	};
+
+	const canToggleNodeEnabled = (node: GraphNode): boolean =>
+		onNodeEnabledChange !== undefined && node.canDisable === true;
+
+	const toggleNodeEnabled = (event: MouseEvent, node: GraphNode): void => {
+		event.preventDefault();
+		event.stopPropagation();
+		if (!canToggleNodeEnabled(node)) {
+			return;
+		}
+		const enabled = node.enabled === false;
+		optimisticEnabled = { ...optimisticEnabled, [node.id]: enabled };
+		try {
+			void Promise.resolve(onNodeEnabledChange?.(node.id, enabled)).catch(() =>
+				clearOptimisticEnabled(node.id, enabled)
+			);
+		} catch {
+			clearOptimisticEnabled(node.id, enabled);
 		}
 	};
 
@@ -2016,6 +2172,7 @@
 					class:selected={selectedIds.has(node.id)}
 					class:active={node.active}
 					class:collapsed={node.collapsed === true}
+					class:disabled={node.enabled === false}
 					class:invalid={node.invalid}
 					class:draft-target={connectionDraft?.snapNodeId === node.id}
 					class="node"
@@ -2026,16 +2183,31 @@
 					style:--node-accent={node.color ?? 'var(--ga-outline)'}
 					style:--node-header-height={`${nodeHeaderHeight(node)}rem`}
 					onpointerdown={(event) => selectNodeBody(event, node)}>
+					{#if node.enabled === false && node.bypassConnections && node.bypassConnections.length > 0}
+						<svg
+							class="node-bypass-wires"
+							viewBox={`0 0 ${nodeWidth(node)} ${nodeHeight(node)}`}
+							aria-hidden="true">
+							{#each node.bypassConnections as bypass (`${bypass.inputSocketId}:${bypass.outputSocketId}`)}
+								{@const path = nodeBypassPath(node, bypass)}
+								{#if path}
+									<path
+										d={path}
+										style:--bypass-color={bypass.color ?? node.color ?? 'var(--ga-socket)'} />
+								{/if}
+							{/each}
+						</svg>
+					{/if}
 					<div class="node-header">
 						{#if node.collapsed === true && firstCollapsedSocket(node, 'input')}
 							{@const socket = firstCollapsedSocket(node, 'input') as GraphSocket}
 							<div class="header-socket-list inputs collapsed-sockets">
-						<button
-							type="button"
-							disabled={socketDisabled(node, socket, 'input')}
-							class:incompatible={socketDisabled(node, socket, 'input')}
-							class:connected={collapsedSocketConnected(node, 'input')}
-							class:draft-target={collapsedSocketDraftTarget(node, 'input')}
+								<button
+									type="button"
+									disabled={socketDisabled(node, socket, 'input')}
+									class:incompatible={socketDisabled(node, socket, 'input')}
+									class:connected={collapsedSocketConnected(node, 'input')}
+									class:draft-target={collapsedSocketDraftTarget(node, 'input')}
 									class="socket header-socket input collapsed-socket"
 									data-node-id={node.id}
 									data-socket-id={socket.id}
@@ -2049,11 +2221,11 @@
 						{:else if node.socketPlacement === 'header'}
 							<div class="header-socket-list inputs">
 								{#each node.inputs as socket (socket.id)}
-							<button
-								type="button"
-								disabled={socketDisabled(node, socket, 'input')}
-								class:incompatible={socketDisabled(node, socket, 'input')}
-								class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
+									<button
+										type="button"
+										disabled={socketDisabled(node, socket, 'input')}
+										class:incompatible={socketDisabled(node, socket, 'input')}
+										class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
 										class:draft-target={connectionDraft?.snapNodeId === node.id &&
 											connectionDraft?.snapSocketId === socket.id}
 										class="socket header-socket input"
@@ -2070,11 +2242,11 @@
 						{:else if node.headerInputs && node.headerInputs.length > 0}
 							<div class="header-socket-list inputs header-inputs-extra">
 								{#each node.headerInputs as socket (socket.id)}
-							<button
-								type="button"
-								disabled={socketDisabled(node, socket, 'input')}
-								class:incompatible={socketDisabled(node, socket, 'input')}
-								class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
+									<button
+										type="button"
+										disabled={socketDisabled(node, socket, 'input')}
+										class:incompatible={socketDisabled(node, socket, 'input')}
+										class:connected={connectedSockets.has(`${node.id}:${socket.id}`)}
 										class:draft-target={connectionDraft?.snapNodeId === node.id &&
 											connectionDraft?.snapSocketId === socket.id}
 										class="socket header-socket input"
@@ -2087,6 +2259,18 @@
 									</button>
 								{/each}
 							</div>
+						{/if}
+						{#if node.canDisable === true}
+							<button
+								type="button"
+								class="node-enable"
+								class:enabled={node.enabled !== false}
+								role="switch"
+								aria-checked={node.enabled !== false}
+								aria-label={`${node.enabled === false ? 'Enable' : 'Disable'} ${node.label}`}
+								title={node.enabled === false ? 'Enable node' : 'Disable node'}
+								onpointerdown={(event) => event.stopPropagation()}
+								onclick={(event) => toggleNodeEnabled(event, node)}></button>
 						{/if}
 						{#if renamingNodeId === node.id}
 							<div
@@ -2203,20 +2387,20 @@
 														onclick={(event) => toggleSocketExpanded(event, node, socket, 'input')}>
 														{socketExpanded(node, socket, 'input') ? 'v' : '>'}
 													</button>
-								{:else}
-									<span class="socket-expander-spacer"></span>
-								{/if}
-								{#if inputSocketContent && inputSocketContentVisible(node, socket)}
-									<div
-										class="socket-inline-content"
-										data-no-node-select
-										role="presentation"
-										onpointerdown={(event) => event.stopPropagation()}>
-										{@render inputSocketContent(node, socket)}
-									</div>
-								{/if}
-							</div>
-						{/each}
+												{:else}
+													<span class="socket-expander-spacer"></span>
+												{/if}
+												{#if inputSocketContent && inputSocketContentVisible(node, socket)}
+													<div
+														class="socket-inline-content"
+														data-no-node-select
+														role="presentation"
+														onpointerdown={(event) => event.stopPropagation()}>
+														{@render inputSocketContent(node, socket)}
+													</div>
+												{/if}
+											</div>
+										{/each}
 									</div>
 									<div class="socket-list outputs">
 										{#each displaySockets(node, 'output', node.outputs) as socket (socket.id)}
@@ -2438,6 +2622,11 @@
 		border-color: var(--ga-active);
 	}
 
+	.node.disabled {
+		border-style: dashed;
+		color: color-mix(in srgb, var(--gc-color-text, #e8edf6) 64%, transparent);
+	}
+
 	.node.selected.active {
 		box-shadow: 0 0 0.5rem color-mix(in srgb, var(--gc-color-selection) 70%, transparent);
 	}
@@ -2456,8 +2645,27 @@
 		box-shadow: 0 0 0.4rem var(--ga-selection);
 	}
 
+	.node-bypass-wires {
+		position: absolute;
+		z-index: 1;
+		inset: 0;
+		inline-size: 100%;
+		block-size: 100%;
+		pointer-events: none;
+	}
+
+	.node-bypass-wires path {
+		fill: none;
+		stroke: var(--bypass-color, var(--ga-socket));
+		stroke-width: 0.11rem;
+		stroke-dasharray: 0.28rem 0.22rem;
+		opacity: 0.78;
+		vector-effect: non-scaling-stroke;
+	}
+
 	.node-header {
 		position: relative;
+		z-index: 2;
 		display: flex;
 		align-items: stretch;
 		inline-size: 100%;
@@ -2471,9 +2679,49 @@
 		overflow: hidden;
 	}
 
+	.node-body {
+		position: relative;
+		z-index: 2;
+	}
+
 	.node.collapsed .node-header {
 		border-block-end: 0;
 		border-radius: 0.48rem;
+	}
+
+	.node-enable {
+		position: relative;
+		flex: 0 0 1.05rem;
+		align-self: center;
+		inline-size: 1.05rem;
+		block-size: 100%;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		cursor: pointer;
+	}
+
+	.node-enable::before {
+		content: '';
+		position: absolute;
+		inset: 50% auto auto 50%;
+		box-sizing: border-box;
+		inline-size: 0.54rem;
+		block-size: 0.54rem;
+		border: solid 0.06rem color-mix(in srgb, var(--gc-color-text, #e8edf6) 56%, transparent);
+		border-radius: 999rem;
+		background: color-mix(in srgb, var(--ga-bg) 68%, transparent);
+		transform: translate(-50%, -50%);
+		transition:
+			background 0.14s ease,
+			border-color 0.14s ease,
+			box-shadow 0.14s ease;
+	}
+
+	.node-enable.enabled::before {
+		border-color: color-mix(in srgb, var(--node-accent) 78%, white 12%);
+		background: color-mix(in srgb, var(--node-accent) 82%, white 6%);
+		box-shadow: 0 0 0.28rem color-mix(in srgb, var(--node-accent) 70%, transparent);
 	}
 
 	.node-title {
@@ -2611,7 +2859,7 @@
 		align-content: start;
 		box-sizing: border-box;
 		flex: 0 0 auto;
-		min-block-size: 1.45rem;
+		min-block-size: 1.35rem;
 		padding-block: 0.25rem;
 	}
 
@@ -2622,6 +2870,12 @@
 		min-inline-size: 0;
 	}
 
+	.socket-list.inputs {
+		display: grid;
+		grid-template-columns: max-content 0.85rem max-content;
+		justify-content: start;
+	}
+
 	.socket-list.outputs {
 		min-inline-size: max-content;
 	}
@@ -2629,12 +2883,15 @@
 	.socket-row {
 		display: flex;
 		align-items: center;
-		block-size: 1.45rem;
+		block-size: 1.35rem;
 		min-inline-size: 0;
 	}
 
 	.socket-row.input {
-		justify-content: flex-start;
+		display: grid;
+		grid-template-columns: subgrid;
+		grid-column: 1 / -1;
+		align-items: center;
 	}
 
 	.socket-row.output {
@@ -2678,11 +2935,12 @@
 
 	.socket-inline-content {
 		display: flex;
-		flex: 1 1 8rem;
 		align-items: center;
-		min-inline-size: 4.5rem;
-		max-inline-size: 18rem;
-		margin-inline-end: 0.25rem;
+		justify-content: flex-start;
+		inline-size: max-content;
+		min-inline-size: 0;
+		max-inline-size: min(8.5rem, 100%);
+		margin-inline-end: 0.2rem;
 	}
 
 	.socket {
@@ -2690,7 +2948,7 @@
 		display: flex;
 		align-items: center;
 		gap: 0.25rem;
-		block-size: 1.45rem;
+		block-size: 1.35rem;
 		min-inline-size: 0;
 		padding: 0 0.4rem;
 		border: 0;
@@ -2706,16 +2964,21 @@
 		block-size: 100%;
 	}
 
+	/* In grid/subgrid context (input rows), override flex-dependent sizing */
+	.socket-row.input .socket.input {
+		block-size: 1.35rem;
+	}
+
 	.socket-columns .socket.input {
 		justify-content: flex-start;
-		padding-inline-start: 0.12rem;
+		/* padding-inline-start: 0.12rem; */
 		padding-inline-end: 0.35rem;
 	}
 
 	.socket-columns .socket.output {
 		justify-content: flex-end;
 		padding-inline-start: 0.35rem;
-		padding-inline-end: 0.12rem;
+		/* padding-inline-end: 0.12rem; */
 	}
 
 	.socket span:not(.pin) {

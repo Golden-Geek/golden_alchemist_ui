@@ -28,6 +28,19 @@ export interface GraphNodeSize {
 	height: number;
 }
 
+export interface GraphViewportInset {
+	left?: number;
+	top?: number;
+	right?: number;
+	bottom?: number;
+}
+
+export interface GraphNodeBypassConnection {
+	inputSocketId: string;
+	outputSocketId: string;
+	color?: string;
+}
+
 export interface GraphNode {
 	id: string;
 	label: string;
@@ -35,6 +48,8 @@ export interface GraphNode {
 	description?: string;
 	canRename?: boolean;
 	collapsed?: boolean;
+	enabled?: boolean;
+	canDisable?: boolean;
 	color?: string;
 	socketPlacement?: 'body' | 'header';
 	position: GraphNodePosition;
@@ -44,6 +59,7 @@ export interface GraphNode {
 	inputs: GraphSocket[];
 	outputs: GraphSocket[];
 	headerInputs?: GraphSocket[];
+	bypassConnections?: GraphNodeBypassConnection[];
 	active?: boolean;
 	invalid?: boolean;
 	warning?: string;

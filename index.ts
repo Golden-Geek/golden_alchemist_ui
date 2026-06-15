@@ -4,6 +4,7 @@ export type {
 	GraphConnectionRequest,
 	GraphEdge,
 	GraphNode,
+	GraphNodeBypassConnection,
 	GraphNodeCreationRequest,
 	GraphNodeMove,
 	GraphNodePosition,
@@ -11,5 +12,6 @@ export type {
 	GraphNodeSize,
 	GraphSocket,
 	GraphSocketDirection,
-	GraphSocketRef
+	GraphSocketRef,
+	GraphViewportInset
 } from './types';
