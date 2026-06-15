@@ -507,6 +507,25 @@
 		!hasSocketConnection(node, socket.id) &&
 		!socketHasConnectedChild(node, socket);
 
+	const socketDefaultSlotWidth = (socket: GraphSocket): number => {
+		if (!socket.defaultParamId) return 0;
+		switch ((socket.valueType ?? '').trim()) {
+			case 'vec3':
+			case 'color':
+				return 8.2;
+			case 'vec2':
+				return 6.6;
+			case 'bool':
+				return 1.4;
+			case 'int':
+			case 'float':
+			case 'duration':
+				return 4.6;
+			default:
+				return 5.4;
+		}
+	};
+
 	const toggleSocketExpanded = (
 		event: MouseEvent,
 		node: GraphNode,
@@ -562,7 +581,7 @@
 						nodeHeaderHeight(node) + NODE_BORDER_REM * 2 + 1.2,
 						nodeHeaderHeight(node) +
 							NODE_BORDER_REM * 2 +
-							1.4 +
+							0.8 +
 							Math.max(
 								displayNodeSockets(node, 'input').filter(
 									(socket) => !node.headerInputs?.includes(socket)
@@ -2359,7 +2378,10 @@
 								<div class="socket-columns">
 									<div class="socket-list inputs">
 										{#each displaySockets(node, 'input', node.inputs) as socket (socket.id)}
-											<div class="socket-row input" class:component={socket.parentId}>
+											<div
+												class="socket-row input"
+												class:component={socket.parentId}
+												style:--socket-default-width={`${socketDefaultSlotWidth(socket)}rem`}>
 												<button
 													type="button"
 													disabled={socketDisabled(node, socket, 'input')}
@@ -2849,18 +2871,18 @@
 		flex-direction: column;
 		box-sizing: border-box;
 		block-size: calc(100% - var(--node-header-height, 1.8rem));
-		min-block-size: 2.2rem;
+		min-block-size: 1.75rem;
 	}
 
 	.socket-columns {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) max-content;
-		column-gap: 0.25rem;
+		column-gap: 0.2rem;
 		align-content: start;
 		box-sizing: border-box;
 		flex: 0 0 auto;
 		min-block-size: 1.35rem;
-		padding-block: 0.25rem;
+		padding-block: 0.2rem;
 	}
 
 	.socket-list {
@@ -2871,9 +2893,8 @@
 	}
 
 	.socket-list.inputs {
-		display: grid;
-		grid-template-columns: max-content 0.85rem max-content;
-		justify-content: start;
+		align-items: flex-start;
+		overflow: hidden;
 	}
 
 	.socket-list.outputs {
@@ -2889,9 +2910,13 @@
 
 	.socket-row.input {
 		display: grid;
-		grid-template-columns: subgrid;
-		grid-column: 1 / -1;
+		grid-template-columns: minmax(0, max-content) 0.85rem minmax(
+				0,
+				var(--socket-default-width, 0rem)
+			);
 		align-items: center;
+		inline-size: max-content;
+		max-inline-size: 100%;
 	}
 
 	.socket-row.output {
@@ -2936,11 +2961,11 @@
 	.socket-inline-content {
 		display: flex;
 		align-items: center;
-		justify-content: flex-start;
-		inline-size: max-content;
+		justify-content: stretch;
+		inline-size: var(--socket-default-width, auto);
 		min-inline-size: 0;
-		max-inline-size: min(8.5rem, 100%);
-		margin-inline-end: 0.2rem;
+		max-inline-size: min(var(--socket-default-width, 8.5rem), 100%);
+		overflow: hidden;
 	}
 
 	.socket {
@@ -2967,6 +2992,7 @@
 	/* In grid/subgrid context (input rows), override flex-dependent sizing */
 	.socket-row.input .socket.input {
 		block-size: 1.35rem;
+		max-inline-size: 100%;
 	}
 
 	.socket-columns .socket.input {
@@ -2982,8 +3008,8 @@
 	}
 
 	.socket span:not(.pin) {
-		overflow: visible;
-		text-overflow: clip;
+		overflow: hidden;
+		text-overflow: ellipsis;
 		white-space: nowrap;
 		transition: opacity 0.15s ease;
 	}
@@ -3056,6 +3082,7 @@
 
 	.resize-handle {
 		position: absolute;
+		z-index: 3;
 		inset-inline-end: 0.12rem;
 		inset-block-end: 0.12rem;
 		inline-size: 1rem;
