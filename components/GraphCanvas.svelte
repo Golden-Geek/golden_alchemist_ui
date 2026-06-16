@@ -2150,8 +2150,9 @@
 					{@const start = socketPoint(edge.from, 'output')}
 					{@const end = socketPoint(edge.to, 'input')}
 					{@const gradientId = edgeGradientId(edge, index)}
+					{@const usesGradient = edgeUsesGradient(edge)}
 					{#if path}
-						{#if start && end && edgeUsesGradient(edge)}
+						{#if start && end && usesGradient}
 							<defs>
 								<linearGradient
 									id={gradientId}
@@ -2179,6 +2180,7 @@
 							d={path}
 							class="edge"
 							class:active={edge.active}
+							class:gradient={usesGradient}
 							class:invalid={edge.invalid}
 							class:selected={edge.id !== undefined && selectedEdgeIdSet.has(edge.id)}
 							style:--edge-color={edgeStroke(edge, gradientId)}
@@ -2583,12 +2585,12 @@
 	.wires path.edge {
 		stroke: color-mix(
 			in srgb,
-			var(--edge-color, var(--ga-socket)) 54%,
-			var(--gc-color-background, #11151b) 46%
+			var(--edge-color, var(--ga-socket)) 68%,
+			var(--gc-color-background, #11151b) 32%
 		);
 		stroke-width: 0.13rem;
-		opacity: 0.62;
-		filter: saturate(0.72);
+		opacity: 0.72;
+		filter: saturate(0.82);
 		pointer-events: none;
 		transition:
 			opacity 0.48s ease,
@@ -2597,17 +2599,24 @@
 			filter 0.48s ease;
 	}
 
+	.wires path.edge.gradient {
+		stroke: var(--edge-color, var(--ga-socket));
+	}
+
 	.wires path.edge.active {
-		stroke: var(--edge-color, var(--ga-active));
-		stroke-width: 0.18rem;
-		opacity: 0.9;
-		filter: saturate(1.08)
-			drop-shadow(0 0 0.14rem color-mix(in srgb, var(--ga-active) 36%, transparent));
+		stroke: color-mix(in srgb, var(--edge-color, var(--ga-active)) 88%, white 12%);
+		stroke-width: 0.15rem;
+		opacity: 0.86;
+		filter: saturate(1.02);
 		transition:
 			opacity 0.06s ease-out,
 			stroke 0.06s ease-out,
 			stroke-width 0.06s ease-out,
 			filter 0.06s ease-out;
+	}
+
+	.wires path.edge.gradient.active {
+		stroke: var(--edge-color, var(--ga-active));
 	}
 
 	.wires path.edge.selected {
@@ -2646,24 +2655,24 @@
 	.node {
 		position: absolute;
 		box-sizing: border-box;
-		border: solid 0.08rem color-mix(in srgb, var(--node-accent) 58%, transparent);
+		border: solid 0.08rem color-mix(in srgb, var(--node-accent) 44%, transparent);
 		border-radius: 0.55rem;
 		background: var(--ga-node);
 		box-shadow: 0 0.55rem 1.3rem rgb(0 0 0 / 0.28);
 		color: var(--gc-color-text, #e8edf6);
+		filter: saturate(0.86);
 		overflow: hidden;
 		transition:
 			width 0.18s cubic-bezier(0.2, 0, 0.13, 1),
 			height 0.18s cubic-bezier(0.2, 0, 0.13, 1),
 			border-color 0.46s ease,
-			border-width 0.46s ease,
-			box-shadow 0.46s ease;
+			box-shadow 0.46s ease,
+			filter 0.46s ease;
 	}
 
 	.graph-canvas.node-resizing .node {
 		transition:
 			border-color 0.46s ease,
-			border-width 0.46s ease,
 			box-shadow 0.46s ease;
 	}
 
@@ -2672,17 +2681,18 @@
 	}
 
 	.node.active {
-		border-color: color-mix(in srgb, var(--ga-active) 72%, var(--node-accent) 28%);
-		border-width: 0.105rem;
+		border-color: color-mix(in srgb, var(--node-accent) 88%, white 12%);
+		filter: saturate(1);
 		box-shadow:
+			inset 0 0 0 0.02rem color-mix(in srgb, var(--node-accent) 52%, transparent),
 			0 0.55rem 1.3rem rgb(0 0 0 / 0.28),
-			0 0 0.34rem color-mix(in srgb, var(--ga-active) 24%, transparent);
+			0 0 0.22rem color-mix(in srgb, var(--node-accent) 20%, transparent);
 		transition:
 			width 0.18s cubic-bezier(0.2, 0, 0.13, 1),
 			height 0.18s cubic-bezier(0.2, 0, 0.13, 1),
 			border-color 0.06s ease-out,
-			border-width 0.06s ease-out,
-			box-shadow 0.06s ease-out;
+			box-shadow 0.06s ease-out,
+			filter 0.06s ease-out;
 	}
 
 	.node.disabled {
@@ -2692,6 +2702,7 @@
 
 	.node.selected.active {
 		box-shadow:
+			inset 0 0 0 0.02rem color-mix(in srgb, var(--gc-color-selection) 58%, transparent),
 			0 0.55rem 1.3rem rgb(0 0 0 / 0.28),
 			0 0 0.5rem color-mix(in srgb, var(--gc-color-selection) 52%, transparent);
 	}
