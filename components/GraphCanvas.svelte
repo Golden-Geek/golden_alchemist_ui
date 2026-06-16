@@ -93,6 +93,7 @@
 		nodeContent,
 		nodeHeaderContent,
 		inputSocketContent,
+		outputSocketContent,
 		toolbarEnd,
 		onBackgroundContextMenu,
 		onCreateRequest,
@@ -120,6 +121,7 @@
 		nodeContent?: Snippet<[GraphNode]>;
 		nodeHeaderContent?: Snippet<[GraphNode]>;
 		inputSocketContent?: Snippet<[GraphNode, GraphSocket]>;
+		outputSocketContent?: Snippet<[GraphNode, GraphSocket]>;
 		toolbarEnd?: Snippet;
 		onBackgroundContextMenu?: (event: MouseEvent, position: GraphNodePosition) => void;
 		onCreateRequest?: (request: GraphNodeCreationRequest) => void;
@@ -2416,10 +2418,10 @@
 												{/if}
 												{#if inputSocketContent && inputSocketContentVisible(node, socket)}
 													<div
-														class="socket-inline-content"
-														data-no-node-select
-														role="presentation"
-														onpointerdown={(event) => event.stopPropagation()}>
+													class="socket-inline-content input"
+													data-no-node-select
+													role="presentation"
+													onpointerdown={(event) => event.stopPropagation()}>
 														{@render inputSocketContent(node, socket)}
 													</div>
 												{/if}
@@ -2441,6 +2443,15 @@
 													</button>
 												{:else}
 													<span class="socket-expander-spacer"></span>
+												{/if}
+												{#if outputSocketContent}
+													<div
+														class="socket-inline-content output"
+														data-no-node-select
+														role="presentation"
+														onpointerdown={(event) => event.stopPropagation()}>
+														{@render outputSocketContent(node, socket)}
+													</div>
 												{/if}
 												<button
 													type="button"
@@ -2969,10 +2980,20 @@
 		display: flex;
 		align-items: center;
 		justify-content: stretch;
-		inline-size: 100%;
 		min-inline-size: 0;
 		max-inline-size: 100%;
 		overflow: hidden;
+	}
+
+	.socket-inline-content.input {
+		inline-size: 100%;
+	}
+
+	.socket-inline-content.output {
+		flex: 0 1 auto;
+		justify-content: flex-end;
+		inline-size: auto;
+		max-inline-size: 7rem;
 	}
 
 	.socket {
