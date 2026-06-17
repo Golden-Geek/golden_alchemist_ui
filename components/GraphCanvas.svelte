@@ -2701,6 +2701,7 @@
 	}
 
 	.node.selected.active {
+		border-color: var(--ga-selection);
 		box-shadow:
 			inset 0 0 0 0.02rem color-mix(in srgb, var(--gc-color-selection) 58%, transparent),
 			0 0.55rem 1.3rem rgb(0 0 0 / 0.28),
